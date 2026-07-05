@@ -226,6 +226,7 @@ struct StageKey {
 	unsigned colorOp, colorArg1, colorArg2;
 	unsigned alphaOp, alphaArg1, alphaArg2;
 	unsigned tci;
+	unsigned texgen; // 0=vertex uv set, 1=camera-space position
 	bool xform;
 };
 
@@ -319,8 +320,14 @@ static void getStageKey(WebGLDevice *dev, int stage, StageKey *k)
 	k->alphaArg1 = dev->getStageState(stage, D3DTSS_ALPHAARG1) & 0x7;
 	k->alphaArg2 = dev->getStageState(stage, D3DTSS_ALPHAARG2) & 0x7;
 	const DWORD tciRaw = dev->getStageState(stage, D3DTSS_TEXCOORDINDEX);
+	k->texgen = 0;
 	if (tciRaw & 0xFFFF0000u) {
-		WARN_ONCE(s_texgen, "texgen TEXCOORDINDEX flags 0x%x not implemented (stage %d)", (unsigned)tciRaw, stage);
+		if ((tciRaw & 0xFFFF0000u) == D3DTSS_TCI_CAMERASPACEPOSITION) {
+			// Terrain macro/cloud layers: uv = texture matrix * view-space pos.
+			k->texgen = 1;
+		} else {
+			WARN_ONCE(s_texgen, "texgen TEXCOORDINDEX flags 0x%x not implemented (stage %d)", (unsigned)tciRaw, stage);
+		}
 	}
 	k->tci = tciRaw & 0x1;
 	const DWORD ttf = dev->getStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS);
@@ -382,6 +389,7 @@ uint64_t WebGLPipeline::computeProgramKey(WebGLDevice *dev, unsigned fvf) const
 		put(sk.alphaArg1, 3);
 		put(sk.alphaArg2, 3);
 		put(sk.tci, 1);
+		put(sk.texgen, 1);
 		put(sk.xform ? 1 : 0, 1);
 	}
 	return key | (1ull << 63); // non-zero marker
@@ -531,6 +539,7 @@ WebGLPipeline::ProgramInfo *WebGLPipeline::getProgram(WebGLDevice *dev, unsigned
 	}
 	vs += "void main() {\n";
 	if (l.xyzrhw) {
+		vs += "  vec4 vpos = vec4(0.0);\n";
 		vs += "  float nx = ((aPos.x - uViewportPos.x - 0.5) / uViewportPos.z) * 2.0 - 1.0;\n";
 		vs += "  float ny = 1.0 - ((aPos.y - uViewportPos.y - 0.5) / uViewportPos.w) * 2.0;\n";
 		vs += "  gl_Position = vec4(nx, ny * uYFlip, aPos.z * 2.0 - 1.0, 1.0);\n";
@@ -572,11 +581,15 @@ WebGLPipeline::ProgramInfo *WebGLPipeline::getProgram(WebGLDevice *dev, unsigned
 	}
 	vs += l.hasSpecular ? "  vSpec = aColor1.zyxw;\n" : "  vSpec = vec4(0.0);\n";
 
-	// Per-stage texcoords (selected input set + optional transform).
+	// Per-stage texcoords (selected input set / texgen + optional transform).
 	for (int s = 0; s < 2; s++) {
 		char b[256];
 		const int tci = (int)st[s].tci < texIn ? (int)st[s].tci : 0;
-		if (texIn == 0) {
+		if (st[s].texgen == 1 && !l.xyzrhw) {
+			// D3DTSS_TCI_CAMERASPACEPOSITION: coordinates are the view-space
+			// position run through the stage texture matrix.
+			snprintf(b, sizeof(b), "  vUV%d = (uTexMat%d * vec4(vpos.xyz, 1.0)).xy;\n", s, s);
+		} else if (texIn == 0) {
 			snprintf(b, sizeof(b), "  vUV%d = vec2(0.0);\n", s);
 		} else if (st[s].xform) {
 			snprintf(b, sizeof(b), "  vUV%d = (uTexMat%d * vec4(aUV%d.xy, 0.0, 1.0)).xy;\n", s, s, tci);
@@ -817,9 +830,16 @@ static bool prepareLevelUpload(D3DFORMAT fmt, unsigned w, unsigned h,
 		}
 		return true;
 	}
-	default:
-		WARN_ONCE(s_fmt, "texture format %d not implemented", (int)fmt);
+	default: {
+		// Repeat (capped) so the offender survives the console ring buffer.
+		static int s_fmtLogs = 0;
+		if (s_fmtLogs < 20) {
+			s_fmtLogs++;
+			fprintf(stderr, "[d3d8webgl] MAGENTA: texture format %d (0x%x) not implemented %ux%u\n",
+				(int)fmt, (unsigned)fmt, w, h);
+		}
 		return false;
+	}
 	}
 }
 
@@ -865,6 +885,11 @@ void WebGLPipeline::uploadTexture(WebGLTexture *tex)
 		if (up.compressed) {
 			glCompressedTexImage2D(GL_TEXTURE_2D, lvl, up.internalFormat,
 			                       s->m_width, s->m_height, 0, up.compressedSize, up.pixels);
+			const GLenum cerr = glGetError();
+			if (cerr != GL_NO_ERROR) {
+				fprintf(stderr, "[d3d8webgl] DXT upload error 0x%x lvl=%d %ux%u fmt=0x%x size=%u\n",
+					cerr, lvl, s->m_width, s->m_height, (unsigned)tex->m_format, up.compressedSize);
+			}
 			uploaded = lvl + 1;
 		} else {
 			glTexImage2D(GL_TEXTURE_2D, lvl, up.internalFormat, s->m_width, s->m_height, 0,
@@ -1083,6 +1108,15 @@ void WebGLPipeline::applyUniforms(WebGLDevice *dev, ProgramInfo *prog, unsigned 
 			att[n * 4 + 2] = L.Attenuation1;
 			att[n * 4 + 3] = L.Attenuation2;
 			n++;
+		}
+		static int s_lightLog = 0;
+		if (s_lightLog < 10) {
+			s_lightLog++;
+			fprintf(stderr,
+				"[d3d8webgl] light#%d n=%d amb=0x%08x matD=(%.2f %.2f %.2f %.2f) matA=(%.2f %.2f) matE=(%.2f)\n",
+				s_lightLog, n, (unsigned)dev->getRenderState(D3DRS_AMBIENT),
+				m.Diffuse.r, m.Diffuse.g, m.Diffuse.b, m.Diffuse.a,
+				m.Ambient.r, m.Ambient.g, m.Emissive.r);
 		}
 		glUniform1i(prog->uNumLights, n);
 		glUniform1iv(prog->uLightType, 4, types);
