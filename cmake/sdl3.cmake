@@ -30,8 +30,15 @@ if(SAGE_USE_SDL3)
     )
     
     # Configure SDL3 build options
-    set(SDL_SHARED ON CACHE BOOL "Build SDL3 as shared library" FORCE)
-    set(SDL_STATIC OFF CACHE BOOL "Don't build static library" FORCE)
+    # GeneralsX @build web-port 05/07/2026 Emscripten links everything statically
+    # into the wasm module; SDL3's official Emscripten backend requires static.
+    if(EMSCRIPTEN)
+        set(SDL_SHARED OFF CACHE BOOL "No shared libs on Emscripten" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "Build SDL3 static for wasm" FORCE)
+    else()
+        set(SDL_SHARED ON CACHE BOOL "Build SDL3 as shared library" FORCE)
+        set(SDL_STATIC OFF CACHE BOOL "Don't build static library" FORCE)
+    endif()
     set(SDL_AUDIO ON CACHE BOOL "Enable audio subsystem" FORCE)
     set(SDL_TIMERS ON CACHE BOOL "Enable timers" FORCE)
     set(SDL_EVENTS ON CACHE BOOL "Enable events" FORCE)
@@ -51,7 +58,13 @@ if(SAGE_USE_SDL3)
     # Before SDL3_image build: force PNG discovery to platform-specific libpng
     # Linux: System libpng16.so is dynamic shared library
     # macOS: Use Homebrew PNG or system framework
-    if(NOT APPLE)
+    if(EMSCRIPTEN)
+        # Web (WASM): no system libpng for wasm32; SDL3_image's stb backend
+        # decodes PNG/JPG. Same approach as iOS below.
+        # GeneralsX @build web-port 05/07/2026 - Web port Phase 0
+        set(SDLIMAGE_PNG_LIBPNG OFF CACHE BOOL "No libpng on Emscripten; stb decodes PNG" FORCE)
+        set(SDLIMAGE_PNG_SHARED OFF CACHE BOOL "No shared libpng on Emscripten" FORCE)
+    elseif(NOT APPLE)
         # Find system shared libpng, bypassing vcpkg's static .a.
         # SDL3_image requires a shared .so but vcpkg only provides static libpng16.a.
         # NO_CMAKE_PATH + NO_CMAKE_FIND_ROOT_PATH skips all vcpkg-injected search paths,
@@ -113,11 +126,19 @@ if(SAGE_USE_SDL3)
     # Configure SDL3_image build options
     # Note: PNG will use system libpng-dev (installed in Docker, no vcpkg conflicts)
     set(SDL3IMAGE_INSTALL ON CACHE BOOL "Install SDL3_image" FORCE)
-    set(SDL3IMAGE_DEPS_SHARED ON CACHE BOOL "Use system shared dependencies" FORCE)
+    # GeneralsX @build web-port 05/07/2026 Emscripten: static build, stb-only decoders
+    # (PNG/JPG via stb; no system TIF/WebP libs exist for wasm32).
+    if(EMSCRIPTEN)
+        set(SDL3IMAGE_DEPS_SHARED OFF CACHE BOOL "Static deps on Emscripten" FORCE)
+        set(SDL3IMAGE_TIF OFF CACHE BOOL "No TIF on Emscripten" FORCE)
+        set(SDL3IMAGE_WEBP OFF CACHE BOOL "No WebP on Emscripten" FORCE)
+    else()
+        set(SDL3IMAGE_DEPS_SHARED ON CACHE BOOL "Use system shared dependencies" FORCE)
+        set(SDL3IMAGE_TIF ON CACHE BOOL "Enable TIF support" FORCE)
+        set(SDL3IMAGE_WEBP ON CACHE BOOL "Enable WebP support" FORCE)
+    endif()
     set(SDL3IMAGE_JPG ON CACHE BOOL "Enable JPG support" FORCE)
     set(SDL3IMAGE_PNG ON CACHE BOOL "Enable PNG support (ANI cursor loading)" FORCE)
-    set(SDL3IMAGE_TIF ON CACHE BOOL "Enable TIF support" FORCE)
-    set(SDL3IMAGE_WEBP ON CACHE BOOL "Enable WebP support" FORCE)
     set(SDL3IMAGE_AVIF OFF CACHE BOOL "Disable AVIF (optional)" FORCE)
     set(SDL3IMAGE_XCUR ON CACHE BOOL "Enable X cursor support" FORCE)
     

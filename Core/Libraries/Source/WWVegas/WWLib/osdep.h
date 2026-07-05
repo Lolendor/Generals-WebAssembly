@@ -27,7 +27,7 @@ typedef wchar_t WCHAR;
 
 // GeneralsX @TheSuperHackers @build BenderAI 11/02/2026 Only define strupr/strrev if not already provided by compat headers
 // Note: Check for macro definition, not function existence
-#if !defined(strupr)
+#if !defined(strupr) && !defined(__EMSCRIPTEN__) // GeneralsX @build web-port 05/07/2026 emscripten libc has strupr/strlwr
 static char *strupr(char *str)
 {
     for (int i = 0; i < strlen(str); i++)

@@ -28,6 +28,26 @@ if(SAGE_USE_DX8)
   FetchContent_MakeAvailable(dx8)
   message(STATUS "Using DirectX 8 SDK (Windows native)")
 
+elseif(EMSCRIPTEN)
+  # Web (WASM): No Vulkan in the browser, so DXVK is used for its HEADERS ONLY
+  # (the Wine-style d3d8/windows compat headers that CompatLib re-exports).
+  # The actual D3D8 implementation is the in-tree d3d8webgl static library
+  # (D3D8 -> WebGL2), linked into d3d8lib by CompatLib/CMakeLists.txt.
+  # GeneralsX @build web-port 05/07/2026 - Web port Phase 0
+  set(DXVK_REMOTE_REF 46a3bc018bcae408d49d3c500e4e536a11f6789a) # same pin as the macOS remote build
+  FetchContent_Declare(
+    dxvk
+    GIT_REPOSITORY https://github.com/fbraz3/dxvk.git
+    GIT_TAG        ${DXVK_REMOTE_REF}
+    GIT_SHALLOW    FALSE
+  )
+  # DXVK has no CMakeLists.txt (meson project), so MakeAvailable only populates.
+  FetchContent_MakeAvailable(dxvk)
+  set(DXVK_INCLUDE_DIR "${dxvk_SOURCE_DIR}/include/native" CACHE PATH "DXVK native headers")
+  set(dxvk_SOURCE_DIR "${dxvk_SOURCE_DIR}" CACHE PATH "DXVK source directory (headers only, Emscripten)")
+  message(STATUS "Using DXVK headers only (Emscripten web build; renderer = d3d8webgl)")
+  message(STATUS "DXVK source directory: ${dxvk_SOURCE_DIR}")
+
 elseif(APPLE AND SAGE_USE_MOLTENVK)
   # macOS: Build DXVK 2.6 from source using Meson + MoltenVK
   # GeneralsX @build BenderAI 24/02/2026 - Phase 5 macOS port (Session 61)

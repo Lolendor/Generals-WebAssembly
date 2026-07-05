@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Command &amp; Conquer Generals: Zero Hour — Web</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0b0e11; color: #d8dee6; overflow: hidden;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  #canvas {
+    display: block; width: 100vw; height: 100vh;
+    background: #000; outline: none;
+  }
+  #gx-overlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, #16202b 0%, #0b0e11 100%);
+    text-align: center; padding: 24px;
+  }
+  #gx-title { font-size: 28px; letter-spacing: 2px; margin-bottom: 8px; color: #e8b64c; }
+  #gx-sub { font-size: 13px; opacity: .6; margin-bottom: 40px; }
+  #gx-progress-wrap { width: min(520px, 80vw); }
+  #gx-track {
+    width: 100%; height: 14px; border-radius: 7px;
+    background: #1d2733; overflow: hidden; border: 1px solid #2c3a4a;
+  }
+  #gx-bar {
+    width: 0%; height: 100%;
+    background: linear-gradient(90deg, #b9821f, #e8b64c);
+    transition: width .15s linear;
+  }
+  #gx-pct { margin-top: 10px; font-size: 15px; }
+  #gx-detail { margin-top: 6px; font-size: 12px; opacity: .65; min-height: 16px; }
+  #gx-storage-kind { font-size: 11px; opacity: .4; margin-top: 18px; }
+  #gx-play {
+    display: none; margin-top: 28px; padding: 14px 58px;
+    font-size: 20px; letter-spacing: 3px; cursor: pointer;
+    color: #0b0e11; background: linear-gradient(180deg, #e8b64c, #b9821f);
+    border: none; border-radius: 6px; text-transform: uppercase; font-weight: 700;
+  }
+  #gx-play:hover { filter: brightness(1.1); }
+  #gx-error {
+    display: none; margin-top: 24px; max-width: min(640px, 85vw);
+    padding: 14px 18px; border: 1px solid #7c3a3a; border-radius: 6px;
+    background: #2a1616; color: #f0b0b0; font-size: 13px; line-height: 1.5;
+    white-space: pre-wrap; text-align: left;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+
+<div id="gx-overlay">
+  <div id="gx-title">C&amp;C GENERALS: ZERO HOUR</div>
+  <div id="gx-sub">веб-версия &middot; wasm + WebGL2</div>
+  <div id="gx-progress-wrap">
+    <div id="gx-track"><div id="gx-bar"></div></div>
+    <div id="gx-pct">0%</div>
+  </div>
+  <div id="gx-detail">Инициализация…</div>
+  <button id="gx-play">Играть</button>
+  <div id="gx-error"></div>
+  <div id="gx-storage-kind"></div>
+</div>
+
+<script src="coi-serviceworker.js"></script>
+<script src="storage.js"></script>
+<script src="signaling.js"></script>
+<script src="game.js"></script>
+<script src="loader.js"></script>
+</body>
+</html>

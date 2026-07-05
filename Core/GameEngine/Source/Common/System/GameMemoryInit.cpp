@@ -109,6 +109,14 @@ void userMemoryManagerInitPools()
 	// aren't yet initialized properly! so rely ONLY on straight stdio stuff here.
 	// (not even AsciiString. thanks.)
 
+#ifdef __EMSCRIPTEN__
+	// GeneralsX @bugfix web-port 05/07/2026 This runs during static init (the
+	// memory manager bootstraps from the first operator new - which on the web
+	// is WasmFS's own FileTable constructor). Calling fopen() here re-enters
+	// WasmFS before it finished constructing and aborts. MemoryPools.ini is an
+	// optional dev override; the compiled-in defaults are correct - skip it.
+	return;
+#else
 	// since we're called prior to main, the cur dir might not be what
 	// we expect. so do it the hard way.
 	char buf[_MAX_PATH];
@@ -144,5 +152,6 @@ void userMemoryManagerInitPools()
 		}
 		fclose(fp);
 	}
+#endif // __EMSCRIPTEN__
 }
 

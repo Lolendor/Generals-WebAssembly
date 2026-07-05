@@ -24,7 +24,19 @@
 #
 # Reference: jmarshall OpenAL implementation uses <AL/al.h> throughout.
 
-if(SAGE_USE_OPENAL)
+if(SAGE_USE_OPENAL AND EMSCRIPTEN)
+    # Web (WASM): Emscripten ships its own OpenAL implementation on top of
+    # WebAudio (<AL/al.h>, <AL/alc.h> in the sysroot, linked with -lopenal —
+    # already in the global link options from cmake/emscripten.cmake).
+    # Building openal-soft is unnecessary; just provide the expected target.
+    # GeneralsX @build web-port 05/07/2026 - Web port Phase 0
+    if(NOT TARGET OpenAL::OpenAL)
+        add_library(openal_emscripten INTERFACE)
+        target_link_options(openal_emscripten INTERFACE -lopenal)
+        add_library(OpenAL::OpenAL ALIAS openal_emscripten)
+    endif()
+    message(STATUS "OpenAL: using Emscripten built-in implementation (WebAudio)")
+elseif(SAGE_USE_OPENAL)
     message(STATUS "Configuring OpenAL Soft (v1.24.2) with FetchContent...")
 
     include(FetchContent)

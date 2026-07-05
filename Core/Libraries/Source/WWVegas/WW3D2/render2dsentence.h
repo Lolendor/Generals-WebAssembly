@@ -50,8 +50,9 @@
     #if defined(__APPLE__)
         #include <TargetConditionals.h>
     #endif
-    // iOS has no fontconfig; fonts resolve from a bundled fonts/ directory instead
-    #if !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+    // iOS/web have no fontconfig; fonts resolve from a bundled fonts/ directory instead
+    // GeneralsX @build web-port 05/07/2026 Emscripten uses the iOS bundled-fonts path
+    #if !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE) && !defined(__EMSCRIPTEN__)
         #include <fontconfig/fontconfig.h>
     #endif
 #endif

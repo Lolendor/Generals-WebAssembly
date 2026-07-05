@@ -24,6 +24,10 @@ endif()
 # macOS port option (Phase 5)
 option(SAGE_USE_MOLTENVK "Use MoltenVK for Vulkan on macOS (Phase 5 macOS port)" OFF)
 
+# Web port option: d3d8webgl renderer (D3D8 -> WebGL2) for Emscripten builds
+# GeneralsX @build web-port 05/07/2026 - Web port Phase 0
+option(SAGE_USE_WEBGL "Use the d3d8webgl renderer (Emscripten web port)" OFF)
+
 # SagePatch — optional QoL features for casual play (screenshot, cursor lock,
 # brightness, camera/scroll INI overrides). Compiles to a separate shared lib
 # that is loaded via DYLD_INSERT_LIBRARIES (macOS) / LD_PRELOAD (Linux) at runtime.
@@ -90,8 +94,13 @@ if(UNIX)
     target_compile_definitions(core_config INTERFACE _UNIX)
     # Ubuntu 24.04+ and macOS have strlcpy/strlcat/wcslcpy/wcslcat in libc
     # GeneralsX @TheSuperHackers @build BenderAI 11/02/2026 Added guards for glibc 2.38+
-    target_compile_definitions(core_config INTERFACE 
-        HAVE_STRLCPY HAVE_STRLCAT HAVE_WCSLCPY HAVE_WCSLCAT)
+    # GeneralsX @build web-port 05/07/2026 Emscripten's musl has strlcpy/strlcat but NOT wcslcpy/wcslcat
+    if(EMSCRIPTEN)
+        target_compile_definitions(core_config INTERFACE HAVE_STRLCPY HAVE_STRLCAT)
+    else()
+        target_compile_definitions(core_config INTERFACE
+            HAVE_STRLCPY HAVE_STRLCAT HAVE_WCSLCPY HAVE_WCSLCAT)
+    endif()
 endif()
 
 if(RTS_BUILD_OPTION_DEBUG)
@@ -130,6 +139,13 @@ endif()
 if(SAGE_USE_GLM)
     target_compile_definitions(core_config INTERFACE SAGE_USE_GLM)
     message(STATUS "GLM math library enabled (DirectX 8 replacement)")
+endif()
+
+# Web port: d3d8webgl renderer define
+# GeneralsX @build web-port 05/07/2026 - Web port Phase 0
+if(SAGE_USE_WEBGL)
+    target_compile_definitions(core_config INTERFACE SAGE_USE_WEBGL)
+    message(STATUS "d3d8webgl renderer enabled (D3D8 -> WebGL2)")
 endif()
 
 # macOS MoltenVK detection (Phase 5)

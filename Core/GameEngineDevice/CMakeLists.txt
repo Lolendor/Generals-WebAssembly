@@ -278,8 +278,16 @@ if(SAGE_USE_OPENAL)
 endif()
 
 if(RTS_BUILD_OPTION_FFMPEG)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavformat libavutil libswscale)
+    # GeneralsX @build web-port 05/07/2026 Emscripten has no pkg-config/vcpkg;
+    # a minimal FFmpeg is built from source and exposed as PkgConfig::FFMPEG.
+    if(EMSCRIPTEN)
+        include(${CMAKE_SOURCE_DIR}/cmake/ffmpeg-emscripten.cmake)
+        set(FFMPEG_FOUND TRUE)
+        set(FFMPEG_INCLUDE_DIRS "")
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavformat libavutil libswscale)
+    endif()
 
     if(FFMPEG_FOUND)
         target_sources(corei_gameenginedevice_private INTERFACE
@@ -288,7 +296,9 @@ if(RTS_BUILD_OPTION_FFMPEG)
             Source/VideoDevice/FFmpeg/FFmpegFile.cpp
             Source/VideoDevice/FFmpeg/FFmpegVideoPlayer.cpp
         )
-        target_include_directories(corei_gameenginedevice_private INTERFACE ${FFMPEG_INCLUDE_DIRS})
+        if(FFMPEG_INCLUDE_DIRS)
+            target_include_directories(corei_gameenginedevice_private INTERFACE ${FFMPEG_INCLUDE_DIRS})
+        endif()
 
         include(${CMAKE_SOURCE_DIR}/cmake/ffmpeg_framework_fix.cmake)
         sage_fix_ffmpeg_framework_flags()

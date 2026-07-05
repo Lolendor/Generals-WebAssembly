@@ -23,13 +23,24 @@ if(NOT SAGE_USE_GLM)
     message(FATAL_ERROR "GLM is required for d3dx8 compatibility layer")
 endif()
 
-find_package(glm CONFIG REQUIRED)
+# GeneralsX @build web-port 05/07/2026 Emscripten provides glm/gli via FetchContent
+# (cmake/emscripten.cmake); only fall back to vcpkg find_package when absent.
+if(NOT TARGET glm::glm)
+    find_package(glm CONFIG REQUIRED)
+endif()
 target_link_libraries(d3dx8 PUBLIC glm::glm)
 
 # GeneralsX @build felipebraz 20/06/2025 GLI causes make_vec4 ambiguity with Apple Clang - only link on Windows
 if(NOT APPLE)
-    find_package(gli CONFIG REQUIRED)
+    if(NOT TARGET gli)
+        find_package(gli CONFIG REQUIRED)
+    endif()
     target_link_libraries(d3dx8 PUBLIC gli)
+    # GeneralsX @build web-port 05/07/2026 clang 19+ (emscripten) makes gli's
+    # `template functor.template operator()<...>` spelling a hard error by default.
+    if(EMSCRIPTEN)
+        target_compile_options(d3dx8 PRIVATE -Wno-error=missing-template-arg-list-after-template-kw -Wno-missing-template-arg-list-after-template-kw)
+    endif()
 endif()
 
 # d3dx8 needs bittype.h from WWLib for Win32 types (DWORD, BYTE, UINT, etc.)
@@ -74,8 +85,11 @@ else()
     if(NOT dxvk_SOURCE_DIR)
         message(FATAL_ERROR "DXVK not fetched! Ensure SAGE_USE_DX8=OFF and cmake/dx8.cmake was included")
     endif()
-    if(APPLE)
-        # macOS: DXVK built from git source -- Wine-style include/native layout
+    if(APPLE OR EMSCRIPTEN)
+        # macOS + Web: DXVK from git source -- Wine-style include/native layout
+        # (on Emscripten the headers are the ONLY thing consumed from DXVK; the
+        # implementation behind them is the in-tree d3d8webgl static library)
+        # GeneralsX @build web-port 05/07/2026 - Web port Phase 0
         target_include_directories(d3d8lib INTERFACE
             ${dxvk_SOURCE_DIR}/include/native
             ${dxvk_SOURCE_DIR}/include/native/windows
@@ -92,10 +106,18 @@ else()
     # (_deps/dxvk-build-macos/src/d3d*/), not in ${dxvk_SOURCE_DIR}/lib — that path does not exist.
     # Linux prebuilt DXVK native package does have a lib/ dir, so the guard is macOS-only.
     # Passing a non-existent -L path produces: ld: warning: search path '.../dxvk-src/lib' not found
-    if(NOT APPLE)
+    if(NOT APPLE AND NOT EMSCRIPTEN)
         target_link_directories(d3d8lib INTERFACE
             ${dxvk_SOURCE_DIR}/lib
         )
+    endif()
+
+    # Web port: the D3D8 implementation is the in-tree d3d8webgl static lib
+    # (statically linked; dx8wrapper.cpp calls ::Direct3DCreate8 directly
+    # instead of dlopen'ing a DXVK dylib).
+    # GeneralsX @build web-port 05/07/2026 - Web port Phase 0
+    if(EMSCRIPTEN AND SAGE_USE_WEBGL)
+        target_link_libraries(d3d8lib INTERFACE d3d8webgl)
     endif()
 endif()
 

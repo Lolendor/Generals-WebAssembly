@@ -1646,7 +1646,7 @@ FontCharsClass::Update_Current_Buffer (int char_width)
 
 #if defined(SAGE_USE_FREETYPE) && !defined(_WIN32)
 
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#if (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE) || defined(__EMSCRIPTEN__)
 
 #include <cctype>
 #include <cstdio>
@@ -1654,13 +1654,15 @@ FontCharsClass::Update_Current_Buffer (int char_width)
 
 ////////////////////////////////////////////////////////////////////////////////////
 //
-//	Locate_Font_FontConfig (iOS)
+//	Locate_Font_FontConfig (iOS / Web)
 //
 // iOS has no fontconfig and no user-accessible system font files. Fonts are
 // resolved from a "fonts" directory below the current working directory (the
 // app's Documents folder, where game data also lives). The requested face name
 // is normalized (lowercase, spaces stripped) and tried as <name>.ttf/.otf/.ttc;
 // arial.ttf serves as the universal fallback since the game UI is Arial-based.
+// GeneralsX @build web-port 05/07/2026 The web build uses the same scheme: the
+// JS loader ships a fonts/ dir inside /opfs/GameData (the engine's CWD).
 ////////////////////////////////////////////////////////////////////////////////////
 const char *
 FontCharsClass::Locate_Font_FontConfig (const char *font_name)
@@ -1694,7 +1696,7 @@ FontCharsClass::Locate_Font_FontConfig (const char *font_name)
 	return nullptr;
 }
 
-#else // !TARGET_OS_IPHONE
+#else // !TARGET_OS_IPHONE && !__EMSCRIPTEN__
 
 ////////////////////////////////////////////////////////////////////////////////////
 //

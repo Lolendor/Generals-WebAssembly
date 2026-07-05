@@ -25,7 +25,8 @@
 #include <Utility/stdint_adapter.h>
 
 
-#if defined(__linux__) || defined(__CYGWIN__)
+// GeneralsX @build web-port 05/07/2026 Emscripten's musl libc ships <endian.h> like Linux
+#if defined(__linux__) || defined(__CYGWIN__) || defined(__EMSCRIPTEN__)
 #include <endian.h>
 
 #elif defined(__APPLE__)
@@ -116,7 +117,8 @@
 
 
 // Endian helper function data types
-#if defined(__linux__) || defined(__CYGWIN__)
+// GeneralsX @build web-port 05/07/2026 Emscripten uses the same standard types
+#if defined(__linux__) || defined(__CYGWIN__) || defined(__EMSCRIPTEN__)
 typedef uint16_t SwapType16;
 typedef uint32_t SwapType32;
 typedef uint64_t SwapType64;

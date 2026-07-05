@@ -1,0 +1,15 @@
+{
+  "_comment": "Сетевой конфиг GeneralsX Web. Правьте свободно: iceServers — список STUN/TURN для WebRTC (можно вписать свои TURN: {\"urls\": \"turn:1.2.3.4:3478\", \"username\": \"...\", \"credential\": \"...\"}); mqttBrokers — публичные MQTT-over-WebSocket брокеры для сигналинга (обход по списку при недоступности).",
+  "iceServers": [
+    { "urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+    { "urls": "stun:stun.cloudflare.com:3478" },
+    { "urls": "turn:a.relay.metered.ca:80", "username": "openrelayproject", "credential": "openrelayproject" },
+    { "urls": "turn:a.relay.metered.ca:443", "username": "openrelayproject", "credential": "openrelayproject" },
+    { "urls": "turn:a.relay.metered.ca:443?transport=tcp", "username": "openrelayproject", "credential": "openrelayproject" }
+  ],
+  "mqttBrokers": [
+    "wss://broker.hivemq.com:8884/mqtt",
+    "wss://test.mosquitto.org:8081/mqtt",
+    "wss://broker.emqx.io:8084/mqtt"
+  ]
+}

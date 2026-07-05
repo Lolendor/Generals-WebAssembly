@@ -47,6 +47,10 @@ include(cmake/ccache.cmake)
 # This file handles extra settings wanted/needed for different compilers.
 include(cmake/compilers.cmake)
 
+# Emscripten (WebAssembly) build: global flags + header-only deps normally
+# provided by vcpkg. Self-guarded with if(NOT EMSCRIPTEN) return().
+include(cmake/emscripten.cmake)
+
 # Debug symbol stripping for Release builds (MinGW)
 include(cmake/debug_strip.cmake)
 

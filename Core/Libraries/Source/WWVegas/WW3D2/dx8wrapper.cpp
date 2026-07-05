@@ -574,6 +574,11 @@ bool DX8Wrapper::Init(void * hwnd, bool lite)
 		// GeneralsX @build BenderAI 10/02/2026 - Platform-specific DLL/SO/DYLIB loading (Phase 5: macOS)
 #ifdef _WIN32
 		D3D8Lib = LoadLibrary("D3D8.DLL");
+#elif defined(__EMSCRIPTEN__)
+		// GeneralsX @build web-port 05/07/2026 - Web port Phase 0
+		// The browser build links the d3d8webgl renderer (D3D8 -> WebGL2)
+		// statically; there is no dynamic library and no dlopen in wasm.
+		fprintf(stderr, "DEBUG: DX8Wrapper::Init() - Using statically linked d3d8webgl renderer (Web)\n");
 #elif defined(__APPLE__)
 		fprintf(stderr, "DEBUG: DX8Wrapper::Init() - Loading libdxvk_d3d8.dylib (Apple)...\n");
 		// iOS confines dlopen to the app bundle; bare names don't resolve there, so
@@ -599,6 +604,10 @@ bool DX8Wrapper::Init(void * hwnd, bool lite)
 		}
 #endif
 
+#if defined(__EMSCRIPTEN__)
+		// Statically linked entry point from d3d8webgl; no library handle involved.
+		Direct3DCreate8Ptr = ::Direct3DCreate8;
+#else
 		if (D3D8Lib == nullptr) {
 			fprintf(stderr, "ERROR: DX8Wrapper::Init() - Failed to load D3D8 library\n");
 			return false;	// Return false at this point if init failed
@@ -606,6 +615,7 @@ bool DX8Wrapper::Init(void * hwnd, bool lite)
 
 		fprintf(stderr, "DEBUG: DX8Wrapper::Init() - Getting Direct3DCreate8 function pointer...\n");
 		Direct3DCreate8Ptr = (Direct3DCreate8Type) GetProcAddress(D3D8Lib, "Direct3DCreate8");
+#endif
 		if (Direct3DCreate8Ptr == nullptr) {
 			fprintf(stderr, "ERROR: DX8Wrapper::Init() - Failed to get Direct3DCreate8 function\n");
 			return false;

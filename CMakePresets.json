@@ -278,6 +278,44 @@
             "environment": {
                 "PKG_CONFIG_PATH": ""
             }
+        },
+        {
+            "name": "emscripten",
+            "displayName": "Web (Emscripten/WASM + WebGL2 + SDL3 + OpenAL)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "toolchainFile": "$env{EMSCRIPTEN_ROOT}/cmake/Modules/Platform/Emscripten.cmake",
+            "description": "Web port: wasm32 via Emscripten. d3d8webgl renderer (D3D8->WebGL2), SDL3 windowing/input, Emscripten built-in OpenAL, WASMFS+OPFS assets. Set EMSCRIPTEN_ROOT to the emscripten dir (e.g. $(brew --prefix emscripten)/libexec or $EMSDK/upstream/emscripten).",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "SAGE_USE_DX8": "OFF",
+                "SAGE_USE_SDL3": "ON",
+                "SAGE_USE_OPENAL": "ON",
+                "SAGE_USE_GLM": "ON",
+                "SAGE_USE_MOLTENVK": "OFF",
+                "SAGE_USE_WEBGL": "ON",
+                "SAGE_UPDATE_CHECK": "OFF",
+                "RTS_CRASHDUMP_ENABLE": "OFF",
+                "RTS_BUILD_OPTION_FFMPEG": "ON",
+                "RTS_BUILD_OPTION_SAGE_PATCH": "OFF",
+                "RTS_BUILD_GENERALS": "OFF",
+                "RTS_BUILD_CORE_TOOLS": "OFF",
+                "RTS_BUILD_ZEROHOUR_TOOLS": "OFF",
+                "RTS_BUILD_ZEROHOUR_EXTRAS": "OFF"
+            },
+            "environment": {
+                "PKG_CONFIG_PATH": ""
+            }
+        },
+        {
+            "name": "emscripten-debug",
+            "displayName": "Web (Emscripten/WASM) Debug",
+            "inherits": "emscripten",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "RTS_BUILD_OPTION_DEBUG": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -383,6 +421,20 @@
             "configurePreset": "linux64-deploy",
             "displayName": "Build Linux 64-bit DXVK/SDL3/OpenAL Release",
             "description": "Build Linux 64-bit with DXVK graphics, SDL3 windowing, and OpenAL audio"
+        },
+        {
+            "name": "emscripten",
+            "configurePreset": "emscripten",
+            "displayName": "Build Web (Emscripten/WASM) Release",
+            "description": "Build the Zero Hour web port (GeneralsXZH.js/.wasm)",
+            "targets": ["z_generals"]
+        },
+        {
+            "name": "emscripten-debug",
+            "configurePreset": "emscripten-debug",
+            "displayName": "Build Web (Emscripten/WASM) Debug",
+            "description": "Build the Zero Hour web port with assertions and source maps",
+            "targets": ["z_generals"]
         }
     ],
     "workflowPresets": [
