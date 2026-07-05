@@ -74,7 +74,7 @@ Secure-context matrix: HTTPS-хостинг без COOP/COEP → coi-servicework
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Emscripten toolchain: preset `emscripten`, cmake/emscripten.cmake, d3d8webgl null device, WebMain.cpp; engine compiles+links, boots in browser | **DONE 2026-07-05** |
-| 1 | Go server (web/), loader UI, OPFS download+permanent cache, IndexedDB fallback, self-signed TLS; headless boot from storage | **infra DONE 2026-07-05** — verified end-to-end on synthetic assets (both storage modes: engine reaches INI loading); full acceptance (boot to `execute()`) needs a real asset pack |
+| 1 | Static bundle, loader UI, OPFS download+permanent cache, IndexedDB fallback, self-signed TLS; optional Go server | **ACCEPTED 2026-07-05** — real asset pack (969 MB): main menu runs with live shell-map game logic and audio (OpenAL→WebAudio); picture pending Phase 2 |
 | 2 | d3d8webgl renderer: fixed-function → WebGL2 (program cache, XYZRHW UI path, DXT textures, FBO render targets) | todo (the big one) |
 | 3 | Audio (Emscripten OpenAL), input polish, web DefaultOptions.ini, FramePacer sleep, saves in /opfs/userdata | todo |
 | 4 | Video: FFmpeg-wasm already builds (cmake/ffmpeg-emscripten.cmake, bink+wav+mp3 decoders); verify playback | wired, untested |

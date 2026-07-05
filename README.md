@@ -29,7 +29,7 @@ browser/WASM target; the Apple-platform ports below still work.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Emscripten toolchain: the whole engine compiles, links, and boots in the browser | ✅ done |
-| 1 | Static bundle + loader UI, OPFS permanent cache (IndexedDB fallback), asset packing, optional Go server | ✅ done (validation on a full asset set pending) |
+| 1 | Static bundle + loader UI, OPFS permanent cache (IndexedDB fallback), asset packing, optional Go server | ✅ done — verified on a real install: main menu runs in-browser with live game logic and audio |
 | 2 | `d3d8webgl` renderer: D3D8 fixed-function → WebGL2 | 🚧 next — until then there is no picture, engine runs headless |
 | 3 | Audio (OpenAL→WebAudio), input polish, saves | planned |
 | 4 | Video playback (FFmpeg-wasm, already builds) | wired |
