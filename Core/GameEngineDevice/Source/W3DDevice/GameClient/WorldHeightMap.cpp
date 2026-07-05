@@ -1008,6 +1008,18 @@ void WorldHeightMap::readTexClass(TXTextureClass *texClass, TileData **tileData)
 		theFile = TheFileSystem->openFile( texturePath, File::READ|File::BINARY);
 	}
 
+#ifdef __EMSCRIPTEN__
+	// GeneralsX @build web-port 05/07/2026 This failure used to be completely silent and
+	// produced an all-black terrain atlas (every source tile stays null). Say which
+	// texture is missing so a broken asset set is diagnosable from the browser console.
+	if (theFile == nullptr) {
+		fprintf(stderr, "[TERRAIN] tile texture not found: class '%s' -> '%s'%s\n",
+		        texClass->name.str(),
+		        terrain ? texturePath : "(no TerrainType INI entry)",
+		        terrain ? " (is the base Generals install packed?)" : "");
+	}
+#endif
+
 	if (theFile != nullptr) {
 		GDIFileStream theStream(theFile);
 		InputStream *pStr = &theStream;

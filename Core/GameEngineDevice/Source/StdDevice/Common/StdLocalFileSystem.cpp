@@ -82,7 +82,10 @@ static std::filesystem::path fixFilenameFromWindowsPath(const Char *filename, In
 				return assetRootPath;
 			}
 
-			#ifdef __linux__
+			#if defined(__linux__) || defined(__EMSCRIPTEN__)
+			// GeneralsX @build web-port 05/07/2026 WASMFS/OPFS is case-sensitive like Linux
+			// (verified live: OPFS getFileHandle('hello.txt') misses 'Hello.TXT'), so the web
+			// build needs the same case-insensitive asset-root resolution.
 			// GeneralsX @bugfix BenderAI 11/05/2026 Linux: resolve case-insensitive paths from asset root.
 			// Some cursor files are lowercase on disk (e.g. sccpointer.ani) while INI references mixed-case names.
 			// The existing case-insensitive traversal below only checks cwd, not the asset root fallback.

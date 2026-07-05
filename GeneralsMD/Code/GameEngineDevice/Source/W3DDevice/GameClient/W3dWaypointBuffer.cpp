@@ -154,6 +154,10 @@ void W3DWaypointBuffer::drawWaypoints(RenderInfoClass &rinfo)
   if ( ! TheInGameUI )
     return;
 
+	// GeneralsX @build web-port 05/07/2026 If the SCMNode asset failed to load, every
+	// WW3D::Render(*m_waypointNodeRobj) below is a virtual call through NULL. Bail out.
+	if ( ! m_waypointNodeRobj )
+		return;
 
   setDefaultLineStyle();
 

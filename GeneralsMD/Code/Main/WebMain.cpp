@@ -136,9 +136,13 @@ static bool PopulateFromIdb()
 		}, i);
 		const size_t size = (size_t)sizeD;
 
-		// Create intermediate directories under /opfs/GameData.
-		std::string full = std::string("/opfs/GameData/") + pathBuf;
-		for (size_t p = strlen("/opfs/GameData/"); p < full.size(); p++) {
+		// Create intermediate directories under /opfs/GameData. Paths prefixed
+		// with GameDataGenerals/ (the optional base-game install) live as an
+		// /opfs sibling instead - see gxStoragePath() in storage.js.
+		std::string full = (strncmp(pathBuf, "GameDataGenerals/", 17) == 0)
+			? std::string("/opfs/") + pathBuf
+			: std::string("/opfs/GameData/") + pathBuf;
+		for (size_t p = strlen("/opfs/"); p < full.size(); p++) {
 			if (full[p] == '/') {
 				std::string dir = full.substr(0, p);
 				mkdir(dir.c_str(), 0777);
@@ -229,6 +233,12 @@ static bool MountGameStorage()
 	// Asset root: StdBIGFileSystem::resolvePrimaryAssetDirectory() checks this
 	// env var first; everything else (Data/, Maps/) resolves from the CWD.
 	setenv("CNC_GENERALS_ZH_PATH", "/opfs/GameData", 1);
+
+	// Base-game assets: ZH only ships the addon's .big set; ground terrain
+	// tiles, roads and many W3D models live in the first game's Terrain.big/
+	// W3D.big/Textures.big. loadBaseGeneralsAssetsForZH() tries this env var
+	// first and silently moves on if the directory has no .big files.
+	setenv("CNC_GENERALS_PATH", "/opfs/GameDataGenerals", 1);
 
 	// User data: GlobalData::BuildUserDataPathFromRegistry() Linux/XDG branch
 	// yields $XDG_DATA_HOME/GeneralsX/GeneralsZH/.

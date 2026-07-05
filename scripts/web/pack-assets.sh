@@ -7,18 +7,27 @@
 # and generates manifest.json.
 #
 # Usage:
-#   scripts/web/pack-assets.sh /path/to/GeneralsZH [output-dir]
+#   scripts/web/pack-assets.sh /path/to/GeneralsZH [output-dir] [/path/to/base/Generals]
+#
+# Zero Hour only ships the addon's .big archives; ground terrain tiles, road
+# textures and many W3D models live in the FIRST game's Terrain.big/W3D.big/
+# Textures.big. Pass the base "Command and Conquer Generals" install as the
+# third argument - it is packed under files/GameDataGenerals/ and lands in
+# OPFS as a sibling of GameData (CNC_GENERALS_PATH, see WebMain.cpp), so the
+# engine's recursive primary *.big scan of GameData never mixes the two.
 #
 # Output layout (fetched by the loader via relative paths):
-#   <out>/files/...        the asset tree (also what lands in OPFS GameData/)
+#   <out>/files/...                  the ZH asset tree (OPFS GameData/)
+#   <out>/files/GameDataGenerals/... base-game assets (OPFS GameDataGenerals/)
 #   <out>/manifest.json    {version, totalBytes, files:[{path,size,sha256}]}
 #
 # GeneralsX @build web-port 05/07/2026 - Web port Phase 1
 set -euo pipefail
 
-SRC="${1:?usage: pack-assets.sh /path/to/GeneralsZH [output-dir]}"
+SRC="${1:?usage: pack-assets.sh /path/to/GeneralsZH [output-dir] [/path/to/base/Generals]}"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${2:-$REPO_ROOT/web/dist/assets}"
+BASE_SRC="${3:-}"
 
 if [ ! -d "$SRC" ]; then
     echo "ERROR: $SRC is not a directory" >&2
@@ -33,13 +42,35 @@ mkdir -p "$OUT/files"
 
 echo "==> Copying game data from $SRC"
 # .big archives (the bulk), plus loose data the engine reads directly.
+# GameDataGenerals/ is the base game staged by the block below - protect it
+# from --delete when re-packing the ZH tree.
 rsync -a --delete \
+    --exclude='GameDataGenerals/' \
     --include='*/' \
     --include='*.big' \
     --include='Data/**' \
     --include='Maps/**' \
     --exclude='*' \
     "$SRC/" "$OUT/files/"
+
+if [ -n "$BASE_SRC" ]; then
+    if ! ls "$BASE_SRC"/*.big >/dev/null 2>&1; then
+        echo "ERROR: no .big archives in $BASE_SRC - is this the base Generals install?" >&2
+        exit 1
+    fi
+    echo "==> Copying base Generals data from $BASE_SRC"
+    rsync -a --delete \
+        --include='*/' \
+        --include='*.big' \
+        --include='Data/**' \
+        --include='Maps/**' \
+        --exclude='*' \
+        "$BASE_SRC/" "$OUT/files/GameDataGenerals/"
+elif [ ! -d "$OUT/files/GameDataGenerals" ]; then
+    echo "WARNING: base Generals install not packed - ground terrain tiles, roads" >&2
+    echo "         and many models live in the base game's Terrain.big/W3D.big/" >&2
+    echo "         Textures.big. Re-run with it as the third argument." >&2
+fi
 
 echo "==> Staging fonts (FreeType needs .ttf files in GameData/fonts)"
 FONTS_DIR="$OUT/files/fonts"

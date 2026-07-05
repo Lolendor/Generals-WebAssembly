@@ -1030,6 +1030,15 @@ Int WaterRenderObjClass::init(Real waterLevel, Real dx, Real dy, SceneClass *par
 	/// Hack for now
 	//m_waterType = WATER_TYPE_0_TRANSLUCENT;
 
+#ifdef __EMSCRIPTEN__
+	// GeneralsX @build web-port 05/07/2026 The ps1.1 sea path is dead in ZH (its asset
+	// init is compiled out above under `#if 0`), so drawSea() dereferences never-created
+	// D3D objects -> "null function" trap on web. Downgrade to the fixed-function water
+	// the game ships for no-pixel-shader hardware.
+	if (m_waterType == WATER_TYPE_2_PVSHADER)
+		m_waterType = WATER_TYPE_0_TRANSLUCENT;
+#endif
+
 	///@todo: calculate a real normal/distance for arbitrary planes.
 	m_planeNormal=Vector3(0,0,1);		//water plane normal
 	m_planeDistance=m_level;	//water plane distance(always at zero for now)

@@ -57,6 +57,15 @@ async function gxDetectStorage() {
 // OPFS driver
 // ---------------------------------------------------------------------------
 
+
+// Where a manifest path lands inside the storage root. Regular assets live under
+// GameData/ (the ZH install); paths already prefixed with GameDataGenerals/ are the
+// optional base-game install and live as a sibling, so the engine's recursive
+// primary *.big scan of GameData/ never picks them up out of order.
+function gxStoragePath(path) {
+  return path.startsWith('GameDataGenerals/') ? path : 'GameData/' + path;
+}
+
 class OpfsStorage {
   constructor(root) {
     this.kind = 'opfs';
@@ -94,7 +103,7 @@ class OpfsStorage {
 
   async has(path) {
     try {
-      const { dir, name } = await this._dir('GameData/' + path, false);
+      const { dir, name } = await this._dir(gxStoragePath(path), false);
       await dir.getFileHandle(name);
       return true;
     } catch {
@@ -104,7 +113,7 @@ class OpfsStorage {
 
   async fileSize(path) {
     try {
-      const { dir, name } = await this._dir('GameData/' + path, false);
+      const { dir, name } = await this._dir(gxStoragePath(path), false);
       const fh = await dir.getFileHandle(name);
       const f = await fh.getFile();
       return f.size;
@@ -115,7 +124,7 @@ class OpfsStorage {
 
   // Streams a Response body into the file, reporting progress. Returns bytes written.
   async writeStream(path, response, onProgress) {
-    const { dir, name } = await this._dir('GameData/' + path, true);
+    const { dir, name } = await this._dir(gxStoragePath(path), true);
     const fh = await dir.getFileHandle(name, { create: true });
     const w = await fh.createWritable();
     const reader = response.body.getReader();
@@ -132,7 +141,7 @@ class OpfsStorage {
   }
 
   async readBytes(path) {
-    const { dir, name } = await this._dir('GameData/' + path, false);
+    const { dir, name } = await this._dir(gxStoragePath(path), false);
     const fh = await dir.getFileHandle(name);
     const f = await fh.getFile();
     return await f.arrayBuffer();
@@ -140,7 +149,7 @@ class OpfsStorage {
 
   async remove(path) {
     try {
-      const { dir, name } = await this._dir('GameData/' + path, false);
+      const { dir, name } = await this._dir(gxStoragePath(path), false);
       await dir.removeEntry(name);
     } catch {}
   }
