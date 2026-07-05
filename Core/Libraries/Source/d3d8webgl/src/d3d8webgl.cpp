@@ -38,6 +38,8 @@
 #include <cstring>
 #include <vector>
 
+#include "webgl_pipeline.h"
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -145,6 +147,7 @@ static void FormatLevelLayout(D3DFORMAT fmt, UINT width, UINT height, INT *pitch
 	HRESULT FreePrivateData(REFGUID) override { return D3D_OK; }
 
 class WebGLDevice; // fwd
+class WebGLTexture; // fwd
 
 // ---------------------------------------------------------------------------
 // Surface: system-memory image, texture level view, or render target.
@@ -206,8 +209,14 @@ public:
 		return D3D_OK;
 	}
 
-	HRESULT UnlockRect() override { return D3D_OK; }
+	HRESULT UnlockRect() override
+	{
+		if (m_ownerGL) m_ownerGL->dirty = true;
+		return D3D_OK;
+	}
 
+	GLTextureState *m_ownerGL = nullptr; // owning texture's GL state (level surfaces)
+	WebGLTexture *m_ownerTex = nullptr;  // owning texture (for render-target FBOs)
 	WebGLDevice *m_device;
 	UINT m_width;
 	UINT m_height;
@@ -239,7 +248,10 @@ public:
 		}
 		UINT tw = w, th = h;
 		for (UINT i = 0; i < levels; i++) {
-			m_levels.push_back(new WebGLSurface(dev, tw, th, fmt, D3DRTYPE_TEXTURE));
+			WebGLSurface *lvl = new WebGLSurface(dev, tw, th, fmt, D3DRTYPE_TEXTURE);
+			lvl->m_ownerGL = &m_gl;
+			lvl->m_ownerTex = this;
+			m_levels.push_back(lvl);
 			tw = tw > 1 ? tw / 2 : 1;
 			th = th > 1 ? th / 2 : 1;
 		}
@@ -295,16 +307,22 @@ public:
 	HRESULT UnlockRect(UINT level) override
 	{
 		if (level >= m_levels.size()) return D3DERR_INVALIDCALL;
+		m_gl.dirty = true;
 		return m_levels[level]->UnlockRect();
 	}
 
-	HRESULT AddDirtyRect(const RECT *) override { return D3D_OK; }
+	HRESULT AddDirtyRect(const RECT *) override
+	{
+		m_gl.dirty = true;
+		return D3D_OK;
+	}
 
 	WebGLDevice *m_device;
 	D3DFORMAT m_format;
 	D3DPOOL m_pool;
 	DWORD m_priority = 0;
 	DWORD m_lod = 0;
+	GLTextureState m_gl;
 	std::vector<WebGLSurface *> m_levels;
 };
 
@@ -539,7 +557,11 @@ public:
 		return D3D_OK;
 	}
 
-	HRESULT Unlock() override { return D3D_OK; }
+	HRESULT Unlock() override
+	{
+		m_gl.dirty = true;
+		return D3D_OK;
+	}
 
 	HRESULT GetDesc(D3DVERTEXBUFFER_DESC *pDesc) override
 	{
@@ -558,6 +580,7 @@ public:
 	DWORD m_fvf;
 	D3DPOOL m_pool;
 	DWORD m_priority = 0;
+	GLBufferState m_gl;
 	std::vector<BYTE> m_bits;
 };
 
@@ -589,7 +612,11 @@ public:
 		return D3D_OK;
 	}
 
-	HRESULT Unlock() override { return D3D_OK; }
+	HRESULT Unlock() override
+	{
+		m_gl.dirty = true;
+		return D3D_OK;
+	}
 
 	HRESULT GetDesc(D3DINDEXBUFFER_DESC *pDesc) override
 	{
@@ -607,6 +634,7 @@ public:
 	D3DFORMAT m_format;
 	D3DPOOL m_pool;
 	DWORD m_priority = 0;
+	GLBufferState m_gl;
 	std::vector<BYTE> m_bits;
 };
 
@@ -664,6 +692,14 @@ public:
 		memset(m_textures, 0, sizeof(m_textures));
 		memset(m_streamStride, 0, sizeof(m_streamStride));
 		memset(m_streams, 0, sizeof(m_streams));
+		// D3D default transforms are identity, not zero.
+		for (size_t i = 0; i < kMaxTransforms; i++) {
+			memset(&m_transforms[i], 0, sizeof(D3DMATRIX));
+			m_transforms[i]._11 = m_transforms[i]._22 = 1.0f;
+			m_transforms[i]._33 = m_transforms[i]._44 = 1.0f;
+		}
+		// Phase 2: bring up the WebGL2 pipeline on the canvas.
+		WebGLPipeline::get()->initContext((int)m_pp.BackBufferWidth, (int)m_pp.BackBufferHeight);
 	}
 
 	D3D8WEBGL_IUNKNOWN_IMPL(WebGLDevice)
@@ -731,19 +767,25 @@ public:
 		if (m_pp.BackBufferFormat == D3DFMT_UNKNOWN) m_pp.BackBufferFormat = D3DFMT_X8R8G8B8;
 		releaseBackBuffers();
 		createBackBuffers();
+		WebGLPipeline::get()->resize((int)m_pp.BackBufferWidth, (int)m_pp.BackBufferHeight);
 		D3D8WEBGL_TRACE_CALL("Device::Reset %ux%u", m_pp.BackBufferWidth, m_pp.BackBufferHeight);
 		return D3D_OK;
 	}
 
 	HRESULT Present(const RECT *, const RECT *, HWND, const RGNDATA *) override
 	{
-		// Phase 2: WebGL2 implicit commit happens when the pthread yields.
+		WebGLPipeline::get()->present();
 		return D3D_OK;
 	}
 
 	HRESULT GetBackBuffer(UINT, D3DBACKBUFFER_TYPE, IDirect3DSurface8 **ppBackBuffer) override
 	{
 		if (!ppBackBuffer) return D3DERR_INVALIDCALL;
+		static int s_bbLog = 0;
+		if (s_bbLog < 8) {
+			s_bbLog++;
+			fprintf(stderr, "[d3d8webgl] GetBackBuffer#%d\n", s_bbLog);
+		}
 		m_backBuffer->AddRef();
 		*ppBackBuffer = m_backBuffer;
 		return D3D_OK;
@@ -838,11 +880,19 @@ public:
 		if (!src_surface || !dst_surface) return D3DERR_INVALIDCALL;
 		WebGLSurface *src = static_cast<WebGLSurface *>(src_surface);
 		WebGLSurface *dst = static_cast<WebGLSurface *>(dst_surface);
+		static int s_crLog = 0;
+		if (s_crLog < 12) {
+			s_crLog++;
+			fprintf(stderr, "[d3d8webgl] CopyRects#%d %ux%u(fmt%d,bb=%d)->%ux%u(fmt%d,own=%d) rects=%u\n",
+				s_crLog, src->m_width, src->m_height, (int)src->m_format, src == m_backBuffer ? 1 : 0,
+				dst->m_width, dst->m_height, (int)dst->m_format, dst->m_ownerGL ? 1 : 0, rect_count);
+		}
 		if (src->m_format != dst->m_format) return D3DERR_INVALIDCALL;
 
 		if (rect_count == 0 || src_rects == nullptr) {
 			const size_t n = src->m_bits.size() < dst->m_bits.size() ? src->m_bits.size() : dst->m_bits.size();
 			memcpy(dst->m_bits.data(), src->m_bits.data(), n);
+			if (dst->m_ownerGL) dst->m_ownerGL->dirty = true;
 			return D3D_OK;
 		}
 
@@ -850,6 +900,7 @@ public:
 			// Block copies with arbitrary rects are not needed in Phase 0.
 			const size_t n = src->m_bits.size() < dst->m_bits.size() ? src->m_bits.size() : dst->m_bits.size();
 			memcpy(dst->m_bits.data(), src->m_bits.data(), n);
+			if (dst->m_ownerGL) dst->m_ownerGL->dirty = true;
 			return D3D_OK;
 		}
 
@@ -866,6 +917,7 @@ public:
 				memcpy(d, s, (size_t)cols * bpp);
 			}
 		}
+		if (dst->m_ownerGL) dst->m_ownerGL->dirty = true;
 		return D3D_OK;
 	}
 
@@ -881,6 +933,7 @@ public:
 				? s->m_levels[i]->m_bits.size() : d->m_levels[i]->m_bits.size();
 			memcpy(d->m_levels[i]->m_bits.data(), s->m_levels[i]->m_bits.data(), n);
 		}
+		d->m_gl.dirty = true;
 		return D3D_OK;
 	}
 
@@ -891,10 +944,32 @@ public:
 
 	HRESULT SetRenderTarget(IDirect3DSurface8 *pRenderTarget, IDirect3DSurface8 *pNewZStencil) override
 	{
+		static int s_rtLog = 0;
+		if (s_rtLog < 12 && pRenderTarget) {
+			s_rtLog++;
+			WebGLSurface *rt = static_cast<WebGLSurface *>(pRenderTarget);
+			fprintf(stderr, "[d3d8webgl] SetRenderTarget#%d %ux%u fmt=%d owner=%d (backbuf=%d)\n",
+				s_rtLog, rt->m_width, rt->m_height, (int)rt->m_format,
+				rt->m_ownerGL ? 1 : 0, rt == m_backBuffer ? 1 : 0);
+		}
 		if (pRenderTarget) {
 			pRenderTarget->AddRef();
 			if (m_currentRT) m_currentRT->Release();
 			m_currentRT = static_cast<WebGLSurface *>(pRenderTarget);
+
+			if (m_currentRT == m_backBuffer) {
+				WebGLPipeline::get()->setRenderTarget(this, nullptr);
+			} else if (m_currentRT->m_ownerTex) {
+				WebGLPipeline::get()->setRenderTarget(this, m_currentRT->m_ownerTex);
+			} else {
+				static bool s_rtWarn = false;
+				if (!s_rtWarn) {
+					s_rtWarn = true;
+					fprintf(stderr, "[d3d8webgl] WARN: SetRenderTarget to standalone surface (%ux%u) unsupported\n",
+						m_currentRT->m_width, m_currentRT->m_height);
+				}
+				WebGLPipeline::get()->setRenderTarget(this, nullptr);
+			}
 		}
 		if (pNewZStencil) {
 			pNewZStencil->AddRef();
@@ -929,7 +1004,11 @@ public:
 	// --- Scene / draw --------------------------------------------------------
 	HRESULT BeginScene() override { return D3D_OK; }
 	HRESULT EndScene() override { return D3D_OK; }
-	HRESULT Clear(DWORD, const D3DRECT *, DWORD, D3DCOLOR, float, DWORD) override { return D3D_OK; }
+	HRESULT Clear(DWORD, const D3DRECT *, DWORD flags, D3DCOLOR color, float z, DWORD stencil) override
+	{
+		WebGLPipeline::get()->clear(this, flags, color, z, stencil);
+		return D3D_OK;
+	}
 
 	HRESULT SetTransform(D3DTRANSFORMSTATETYPE state, const D3DMATRIX *matrix) override
 	{
@@ -1092,11 +1171,30 @@ public:
 		return D3D_OK;
 	}
 
-	HRESULT DrawPrimitive(D3DPRIMITIVETYPE, UINT, UINT) override { return D3D_OK; }
-	HRESULT DrawIndexedPrimitive(D3DPRIMITIVETYPE, UINT, UINT, UINT, UINT) override { return D3D_OK; }
-	HRESULT DrawPrimitiveUP(D3DPRIMITIVETYPE, UINT, const void *, UINT) override { return D3D_OK; }
-	HRESULT DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE, UINT, UINT, UINT, const void *, D3DFORMAT,
-	                               const void *, UINT) override { return D3D_OK; }
+	HRESULT DrawPrimitive(D3DPRIMITIVETYPE pt, UINT startVertex, UINT primCount) override
+	{
+		WebGLPipeline::get()->draw(this, pt, startVertex, primCount);
+		return D3D_OK;
+	}
+	HRESULT DrawIndexedPrimitive(D3DPRIMITIVETYPE pt, UINT minIndex, UINT numVertices,
+	                             UINT startIndex, UINT primCount) override
+	{
+		WebGLPipeline::get()->drawIndexed(this, pt, minIndex, numVertices, startIndex, primCount);
+		return D3D_OK;
+	}
+	HRESULT DrawPrimitiveUP(D3DPRIMITIVETYPE pt, UINT primCount, const void *data, UINT stride) override
+	{
+		WebGLPipeline::get()->drawUP(this, pt, primCount, data, stride);
+		return D3D_OK;
+	}
+	HRESULT DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE pt, UINT minVertexIdx, UINT numVertices,
+	                               UINT primCount, const void *indexData, D3DFORMAT indexFormat,
+	                               const void *data, UINT stride) override
+	{
+		WebGLPipeline::get()->drawIndexedUP(this, pt, minVertexIdx, numVertices, primCount,
+		                                    indexData, indexFormat, data, stride);
+		return D3D_OK;
+	}
 	HRESULT ProcessVertices(UINT, UINT, UINT, IDirect3DVertexBuffer8 *, DWORD) override { return D3D_OK; }
 
 	// --- Shaders (fixed-function only: FVF codes pass through) ---------------
@@ -1189,6 +1287,37 @@ public:
 	HRESULT DrawTriPatch(UINT, const float *, const D3DTRIPATCH_INFO *) override { return D3D_OK; }
 	HRESULT DeletePatch(UINT) override { return D3D_OK; }
 
+	// ------- pipeline accessors (WebGLPipeline reads device state) -------
+	DWORD getRenderState(DWORD st) const
+	{
+		return ((size_t)st < kMaxRenderStates) ? m_renderStates[st] : 0;
+	}
+	DWORD getStageState(DWORD stage, DWORD t) const
+	{
+		return (stage < kMaxTextureStages && (size_t)t < kMaxStageStates) ? m_stageStates[stage][t] : 0;
+	}
+	const D3DMATRIX &getTransform(DWORD t) const
+	{
+		return m_transforms[(size_t)t < kMaxTransforms ? t : 0];
+	}
+	const D3DVIEWPORT8 &getViewport() const { return m_viewport; }
+	const D3DMATERIAL8 &getMaterial() const { return m_material; }
+	bool isLightEnabled(unsigned i) const { return i < kMaxLights && m_lightEnabled[i]; }
+	const D3DLIGHT8 &getLight(unsigned i) const { return m_lights[i < kMaxLights ? i : 0]; }
+	unsigned getFVF() const { return m_fvf; }
+	WebGLVertexBuffer *getStream0() const { return static_cast<WebGLVertexBuffer *>(m_streams[0]); }
+	unsigned getStream0Stride() const { return m_streamStride[0]; }
+	WebGLIndexBuffer *getIndices() const { return static_cast<WebGLIndexBuffer *>(m_indices); }
+	unsigned getBaseVertexIndex() const { return m_baseVertexIndex; }
+	WebGLTexture *getTexture2D(unsigned stage) const
+	{
+		if (stage >= kMaxTextureStages || !m_textures[stage]) return nullptr;
+		if (m_textures[stage]->GetType() != D3DRTYPE_TEXTURE) return nullptr;
+		return static_cast<WebGLTexture *>(m_textures[stage]);
+	}
+
+	static constexpr UINT kMaxLights = 8;
+
 private:
 	~WebGLDevice()
 	{
@@ -1220,12 +1349,13 @@ private:
 		if (m_depthStencil) { m_depthStencil->Release(); m_depthStencil = nullptr; }
 	}
 
+public:
 	static constexpr size_t kMaxRenderStates = 256;
 	static constexpr size_t kMaxTransforms = 300; // world matrices live at 256+
 	static constexpr size_t kMaxStageStates = 33;
 	static constexpr UINT kMaxTextureStages = 8;
-	static constexpr UINT kMaxLights = 8;
 	static constexpr UINT kMaxStreams = 16;
+private:
 
 	IDirect3D8 *m_parent;
 	HWND m_focusWindow;
@@ -1562,6 +1692,10 @@ constexpr UINT WebGLDirect3D8::kModes[WebGLDirect3D8::kModeCount][2];
 extern "C" IDirect3D8 *WINAPI Direct3DCreate8(UINT sdkVersion)
 {
 	g_trace = getenv("D3D8WEBGL_TRACE") != nullptr;
-	fprintf(stderr, "[d3d8webgl] Direct3DCreate8(sdk=%u) - Phase 0 null device\n", sdkVersion);
+	fprintf(stderr, "[d3d8webgl] Direct3DCreate8(sdk=%u) - WebGL2 renderer (Phase 2)\n", sdkVersion);
 	return new WebGLDirect3D8();
 }
+
+// The pipeline lives in the same translation unit so it can touch the device
+// and resource internals directly (see webgl_pipeline.h for the interface).
+#include "webgl_pipeline.cpp"

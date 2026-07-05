@@ -315,10 +315,54 @@ int main(int argc, char* argv[])
 
 			ApplicationHWnd = (HWND)TheSDL3Window;
 			fprintf(stderr, "INFO: SDL3 window created successfully\n");
+
+			// Match the engine's internal resolution to the SDL window/canvas
+			// (same pattern as the iOS port): injected as -xres/-yres argv so
+			// the normal command-line path applies them unless the user passed
+			// explicit values via ?args=.
+			{
+				bool userSetRes = false;
+				for (int i = 1; i < __argc; ++i) {
+					if (strcmp(__argv[i], "-xres") == 0 || strcmp(__argv[i], "-yres") == 0) {
+						userSetRes = true;
+						break;
+					}
+				}
+				int winW = 0, winH = 0;
+				SDL_GetWindowSizeInPixels(TheSDL3Window, &winW, &winH);
+				if (!userSetRes && winW >= 640 && winH >= 480) {
+					static char xresVal[16], yresVal[16];
+					static char xresFlag[] = "-xres";
+					static char yresFlag[] = "-yres";
+					snprintf(xresVal, sizeof(xresVal), "%d", winW & ~1);
+					snprintf(yresVal, sizeof(yresVal), "%d", winH & ~1);
+					static char* newArgv[64];
+					int n = 0;
+					for (int i = 0; i < __argc && n < 59; ++i) {
+						newArgv[n++] = __argv[i];
+					}
+					newArgv[n++] = xresFlag;
+					newArgv[n++] = xresVal;
+					newArgv[n++] = yresFlag;
+					newArgv[n++] = yresVal;
+					newArgv[n] = nullptr;
+					__argv = newArgv;
+					__argc = n;
+					fprintf(stderr, "INFO: Web internal resolution set to %sx%s\n", xresVal, yresVal);
+				}
+			}
 		}
 
 		// Call cross-platform game entry point
 		exitcode = GameMain();
+
+		// GeneralsX @build web-port 05/07/2026 - Web port Phase 2
+		// GameMain() returned with the rAF main loop registered and the
+		// engine still alive (see GameEngine::execute web branch). Keep the
+		// wasm runtime (and this pthread) alive; NONE of the teardown below
+		// may run. Quit terminates from inside the loop tick (_exit).
+		fprintf(stderr, "INFO: main loop armed; keeping runtime alive\n");
+		emscripten_exit_with_live_runtime();
 
 		fprintf(stderr, "INFO: GameMain() returned with code %d\n", exitcode);
 

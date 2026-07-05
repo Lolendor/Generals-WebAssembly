@@ -1001,6 +1001,63 @@ void GameEngine::update()
 extern bool DX8Wrapper_IsWindowed;
 extern HWND ApplicationHWnd;
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+/** -----------------------------------------------------------------------------------------------
+ * Web main loop. OffscreenCanvas frames only reach the screen when this
+ * pthread yields to its event loop, so a blocking while() would render a
+ * frozen canvas forever. Instead one loop iteration runs per browser
+ * requestAnimationFrame via emscripten_set_main_loop_arg and execute()
+ * returns immediately; GameMain()/WebMain skip their teardown (the engine
+ * must outlive this call) and quit terminates from inside the tick.
+ * GeneralsX @build web-port 05/07/2026 - Web port Phase 2
+ */
+void GameEngine::execute()
+{
+	auto tick = [](void *arg)
+	{
+		GameEngine *self = static_cast<GameEngine *>(arg);
+		if (self->m_quitting)
+		{
+			fprintf(stderr, "INFO: GameEngine quitting - stopping web main loop\n");
+			emscripten_cancel_main_loop();
+			// Page-side JS shows the exit panel via Module.onExit.
+			_exit(0);
+		}
+
+		try
+		{
+			self->update();
+		}
+		catch (INIException e)
+		{
+			if (e.mFailureMessage)
+				RELEASE_CRASH((e.mFailureMessage));
+			else
+				RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
+		}
+		catch (...)
+		{
+			try
+			{
+				if (TheRecorder && TheRecorder->getMode() == RECORDERMODETYPE_RECORD && TheRecorder->isMultiplayer())
+					TheRecorder->cleanUpReplayFile();
+			}
+			catch (...)
+			{
+			}
+			RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
+		}
+
+		// Native pacing preserved: FramePacer sleeps inside the tick (futex
+		// wait on this pthread), rAF presents whenever the tick returns.
+		TheFramePacer->update();
+	};
+	// fps=0 -> requestAnimationFrame; no infinite-loop simulation (the
+	// "unwind" trick would be swallowed by the catch(...) in WebMain).
+	emscripten_set_main_loop_arg(tick, this, 0, 0);
+}
+#else
 /** -----------------------------------------------------------------------------------------------
  * The "main loop" of the game engine. It will not return until the game exits.
  */
@@ -1092,6 +1149,7 @@ void GameEngine::execute()
 
 	}
 }
+#endif // __EMSCRIPTEN__
 
 /** -----------------------------------------------------------------------------------------------
 	* Factory for the message stream

@@ -55,6 +55,12 @@ Int GameMain()
 		TheGameEngine->execute();
 	}
 
+#ifdef __EMSCRIPTEN__
+	// Web: execute() returned with the rAF main loop still registered; the
+	// engine keeps running after this call. Quit happens inside the tick.
+	// GeneralsX @build web-port 05/07/2026 - Web port Phase 2
+	return exitcode;
+#else
 	// since execute() returned, we are exiting the game
 	delete TheFramePacer;
 	TheFramePacer = nullptr;
@@ -62,5 +68,6 @@ Int GameMain()
 	TheGameEngine = nullptr;
 
 	return exitcode;
+#endif
 }
 
