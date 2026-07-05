@@ -1101,14 +1101,20 @@ void WebGLPipeline::applyUniforms(WebGLDevice *dev, ProgramInfo *prog, unsigned 
 		            dwordToFloat(dev->getRenderState(D3DRS_FOGEND)));
 	}
 
-	if (prog->uMatDiffuse >= 0) {
+	// NOTE: each uniform can be optimized out independently (a program whose
+	// material sources are all vertex colors has NO uMat* uniforms but still
+	// needs its lights). Never gate the light upload on a material location.
+	{
 		const D3DMATERIAL8 &m = dev->getMaterial();
-		glUniform4fv(prog->uMatDiffuse, 1, (const float *)&m.Diffuse);
-		glUniform4fv(prog->uMatAmbient, 1, (const float *)&m.Ambient);
-		glUniform4fv(prog->uMatEmissive, 1, (const float *)&m.Emissive);
+		if (prog->uMatDiffuse >= 0) glUniform4fv(prog->uMatDiffuse, 1, (const float *)&m.Diffuse);
+		if (prog->uMatAmbient >= 0) glUniform4fv(prog->uMatAmbient, 1, (const float *)&m.Ambient);
+		if (prog->uMatEmissive >= 0) glUniform4fv(prog->uMatEmissive, 1, (const float *)&m.Emissive);
+	}
+	if (prog->uGlobalAmbient >= 0) {
 		argbToFloats(dev->getRenderState(D3DRS_AMBIENT), c);
 		glUniform4fv(prog->uGlobalAmbient, 1, c);
-
+	}
+	if (prog->uNumLights >= 0) {
 		int types[4] = {0, 0, 0, 0};
 		float dirs[12] = {0}, poss[12] = {0}, diff[16] = {0}, amb[16] = {0}, att[16] = {0};
 		int n = 0;
@@ -1210,33 +1216,6 @@ void WebGLPipeline::drawCommon(WebGLDevice *dev, unsigned primType, unsigned pri
 
 	ProgramInfo *prog = getProgram(dev, fvf);
 	if (!prog || !prog->prog) return;
-
-	// mul# telemetry: multiply passes (lightmap/cloud, blend DESTCOLOR x ZERO)
-	// darken to black when their texture is empty - dump what they multiply by.
-	if (dev->getRenderState(D3DRS_ALPHABLENDENABLE) &&
-	    dev->getRenderState(D3DRS_SRCBLEND) == D3DBLEND_DESTCOLOR &&
-	    dev->getRenderState(D3DRS_DESTBLEND) == D3DBLEND_ZERO) {
-		static int s_mulLog = 0;
-		if (s_mulLog < 10) {
-			s_mulLog++;
-			WebGLTexture *t0 = dev->getTexture2D(0);
-			size_t nz = 0, tot = 0;
-			if (t0 && !t0->m_levels.empty()) {
-				const auto &bits = t0->m_levels[0]->m_bits;
-				tot = bits.size() / 16;
-				for (size_t i = 0; i < bits.size(); i += 16) nz += (bits[i] != 0);
-			}
-			fprintf(stderr,
-				"[d3d8webgl] mul#%d fvf=0x%x cnt=%u tex=%s fmt=%d %ux%u nz~%zu/%zu cop=%lu carg1=%lu light=%lu\n",
-				s_mulLog, fvf, primCount, t0 ? "Y" : "n",
-				t0 ? (int)t0->m_format : -1,
-				t0 ? t0->m_levels[0]->m_width : 0, t0 ? t0->m_levels[0]->m_height : 0,
-				nz, tot,
-				(unsigned long)dev->getStageState(0, D3DTSS_COLOROP),
-				(unsigned long)dev->getStageState(0, D3DTSS_COLORARG1),
-				(unsigned long)dev->getRenderState(D3DRS_LIGHTING));
-		}
-	}
 
 	applyFixedState(dev);
 	applyUniforms(dev, prog, fvf);
