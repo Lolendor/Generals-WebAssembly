@@ -212,6 +212,17 @@ public:
 	HRESULT UnlockRect() override
 	{
 		if (m_ownerGL) m_ownerGL->dirty = true;
+		if (m_width >= 1024) {
+			static int s_ulLog = 0;
+			if (s_ulLog < 10) {
+				s_ulLog++;
+				size_t nz = 0;
+				for (size_t i = 0; i < m_bits.size(); i += 16) nz += (m_bits[i] != 0);
+				fprintf(stderr, "[d3d8webgl] surfUnlock#%d %ux%u fmt=%d owner=%p glname=%u nz~%zu/%zu\n",
+					s_ulLog, m_width, m_height, (int)m_format, (void *)m_ownerGL,
+					m_ownerGL ? m_ownerGL->name : 0, nz, m_bits.size() / 16);
+			}
+		}
 		return D3D_OK;
 	}
 

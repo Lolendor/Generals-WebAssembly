@@ -854,17 +854,21 @@ void WebGLPipeline::uploadTexture(WebGLTexture *tex)
 	const bool isDXT = FormatIsDXT(tex->m_format);
 
 	static int s_texLog = 0;
-	if (s_texLog < 16) {
+	WebGLSurface *l0t = tex->m_levels[0];
+	if (s_texLog < 40 && (l0t->m_width >= 1024 || s_texLog < 16)) {
 		s_texLog++;
-		WebGLSurface *l0 = tex->m_levels[0];
-		const uint8_t *b = l0->m_bits.data();
-		const size_t mid = l0->m_bits.size() / 2 & ~3u;
+		const uint8_t *b = l0t->m_bits.data();
+		const size_t sz = l0t->m_bits.size();
+		const size_t q1 = (sz / 4) & ~3u, q2 = (sz / 2) & ~3u, q3 = (sz * 3 / 4) & ~3u;
 		size_t nonzero = 0;
-		for (size_t i = 0; i < l0->m_bits.size(); i++) nonzero += (b[i] != 0);
+		for (size_t i = 0; i < sz; i += 16) nonzero += (b[i] != 0); // sampled
 		fprintf(stderr,
-			"[d3d8webgl] tex#%d up fmt=%d %ux%u lvls=%d bytes=%zu nonzero=%zu mid=[%02x %02x %02x %02x]\n",
-			s_texLog, (int)tex->m_format, l0->m_width, l0->m_height, levels,
-			l0->m_bits.size(), nonzero, b[mid], b[mid + 1], b[mid + 2], b[mid + 3]);
+			"[d3d8webgl] tex#%d up fmt=%d %ux%u lvls=%d glstate=%p nz~%zu/%zu q1=[%02x %02x %02x %02x] q2=[%02x %02x %02x %02x] q3=[%02x %02x %02x %02x]\n",
+			s_texLog, (int)tex->m_format, l0t->m_width, l0t->m_height, levels, (void *)&tex->m_gl,
+			nonzero, sz / 16,
+			b[q1], b[q1 + 1], b[q1 + 2], b[q1 + 3],
+			b[q2], b[q2 + 1], b[q2 + 2], b[q2 + 3],
+			b[q3], b[q3 + 1], b[q3 + 2], b[q3 + 3]);
 	}
 	int uploaded = 0;
 	for (int lvl = 0; lvl < levels; lvl++) {
@@ -992,7 +996,23 @@ void WebGLPipeline::applyFixedState(WebGLDevice *dev)
 		glEnable(GL_BLEND);
 		const DWORD sb = dev->getRenderState(D3DRS_SRCBLEND);
 		const DWORD db = dev->getRenderState(D3DRS_DESTBLEND);
-		glBlendFunc(d3dBlendToGL(sb ? sb : D3DBLEND_ONE), d3dBlendToGL(db ? db : D3DBLEND_ZERO));
+		// TEMP DIAGNOSTIC: the terrain cloud/lightmap pass multiplies the
+		// framebuffer by its texture (DESTCOLOR x ZERO). Until the cloud
+		// texture upload is verified, neutralize the pass instead of
+		// multiplying the terrain to black.
+		if (sb == D3DBLEND_DESTCOLOR && db == D3DBLEND_ZERO) {
+			static int s_cloudLog = 0;
+			if (s_cloudLog < 3) {
+				s_cloudLog++;
+				WebGLTexture *t0 = dev->getTexture2D(0);
+				fprintf(stderr, "[d3d8webgl] cloud-pass neutralized (tex0=%s %ux%u fmt=%d)\n",
+					t0 ? "Y" : "n", t0 ? t0->m_levels[0]->m_width : 0,
+					t0 ? t0->m_levels[0]->m_height : 0, t0 ? (int)t0->m_format : -1);
+			}
+			glBlendFunc(GL_ZERO, GL_ONE); // keep dest untouched
+		} else {
+			glBlendFunc(d3dBlendToGL(sb ? sb : D3DBLEND_ONE), d3dBlendToGL(db ? db : D3DBLEND_ZERO));
+		}
 	} else {
 		glDisable(GL_BLEND);
 	}
@@ -1199,22 +1219,36 @@ void WebGLPipeline::drawCommon(WebGLDevice *dev, unsigned primType, unsigned pri
 	ProgramInfo *prog = getProgram(dev, fvf);
 	if (!prog || !prog->prog) return;
 
+	// 3D-draw telemetry: perspective draws only (terrain/meshes), the 2D UI
+	// spam has identity projection and is skipped.
 	static int s_drawLog = 0;
-	if (s_drawLog < 12) {
+	const D3DMATRIX &pj3 = dev->getTransform(D3DTS_PROJECTION);
+	if (s_drawLog < 14 && pj3._11 != 1.0f) {
 		s_drawLog++;
 		WebGLVertexBuffer *vb = dev->getStream0();
-		const float *v = nullptr;
-		if (vb && vb->m_bits.size() >= (size_t)baseVertexBytes + 16) {
-			v = (const float *)(vb->m_bits.data() + baseVertexBytes);
+		const uint8_t *vraw = nullptr;
+		if (vb && vb->m_bits.size() >= (size_t)baseVertexBytes + stride) {
+			vraw = vb->m_bits.data() + baseVertexBytes;
 		}
-		const D3DMATRIX &w = dev->getTransform(D3DTS_WORLD);
-		const D3DMATRIX &pj = dev->getTransform(D3DTS_PROJECTION);
+		FVFLayout tl;
+		parseFVF(fvf, &tl);
+		unsigned diffuse = 0;
+		if (vraw && tl.hasDiffuse) memcpy(&diffuse, vraw + tl.diffuseOffset, 4);
+		WebGLTexture *t0 = dev->getTexture2D(0);
+		WebGLTexture *t1 = dev->getTexture2D(1);
+		const D3DMATRIX &tm0 = dev->getTransform(D3DTS_TEXTURE0);
 		fprintf(stderr,
-			"[d3d8webgl] draw#%d fvf=0x%x stride=%u prim=%u cnt=%u idxFmt=%u start=%u base=%d v0=(%.2f %.2f %.2f %.2f) w00=%.2f p00=%.2f p11=%.2f vp=%ux%u\n",
-			s_drawLog, fvf, stride, primType, primCount, indexFormat, startIndex, baseVertexBytes,
-			v ? v[0] : -1.f, v ? v[1] : -1.f, v ? v[2] : -1.f, v ? v[3] : -1.f,
-			w._11, pj._11, pj._22,
-			(unsigned)dev->getViewport().Width, (unsigned)dev->getViewport().Height);
+			"[d3d8webgl] 3d#%d fvf=0x%x cnt=%u light=%lu tex0=%s(%ux%u f%d) tex1=%s diff=0x%08x tci0=0x%lx ttf0=%lu tm00=%.3f v0=(%.1f %.1f %.1f)\n",
+			s_drawLog, fvf, primCount,
+			(unsigned long)dev->getRenderState(D3DRS_LIGHTING),
+			t0 ? "Y" : "n", t0 ? t0->m_levels[0]->m_width : 0, t0 ? t0->m_levels[0]->m_height : 0,
+			t0 ? (int)t0->m_format : -1, t1 ? "Y" : "n", diffuse,
+			(unsigned long)dev->getStageState(0, D3DTSS_TEXCOORDINDEX),
+			(unsigned long)dev->getStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS),
+			tm0._11,
+			vraw ? ((const float *)vraw)[0] : -1.f,
+			vraw ? ((const float *)vraw)[1] : -1.f,
+			vraw ? ((const float *)vraw)[2] : -1.f);
 	}
 
 	applyFixedState(dev);
