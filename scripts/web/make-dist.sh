@@ -43,6 +43,9 @@ fi
 
 echo "==> Wasm build"
 cp "$WASM_DIR/GeneralsXZH.js" "$WASM_DIR/GeneralsXZH.wasm" "$DIST/"
+BUILD_ID=$(shasum -a 256 "$DIST/GeneralsXZH.wasm" | cut -c1-12)
+printf '{"buildId": "%s"}\n' "$BUILD_ID" > "$DIST/build.json"
+echo "    buildId: $BUILD_ID"
 
 if [ -f "$DIST/assets/manifest.json" ]; then
     echo "==> Assets already packed ($(du -sh "$DIST/assets" | cut -f1))"

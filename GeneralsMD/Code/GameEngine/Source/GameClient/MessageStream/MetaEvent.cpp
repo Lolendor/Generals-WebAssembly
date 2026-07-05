@@ -729,11 +729,19 @@ MetaMapRec *MetaMap::getMetaMapRec(GameMessage::Type t)
 
 	GameMessage::Type t = TheMetaMap->findGameMessageMetaType(c);
 	if (t == GameMessage::MSG_INVALID)
+	{
+		// GeneralsX @debug web-port 05/07/2026 Release builds swallow the
+		// DEBUG_CRASH in findGameMessageMetaType; surface the token before throwing.
+		fprintf(stderr, "ERROR: MetaMap::parseMetaMap - unknown CommandMap meta type '%s'\n", c ? c : "(null)");
 		throw INI_INVALID_DATA;
+	}
 
 	MetaMapRec *map = TheMetaMap->getMetaMapRec(t);
 	if (map == nullptr)
+	{
+		fprintf(stderr, "ERROR: MetaMap::parseMetaMap - no MetaMapRec for '%s'\n", c ? c : "(null)");
 		throw INI_INVALID_DATA;
+	}
 
 	ini->initFromINI(map, TheMetaMapFieldParseTable);
 }

@@ -446,6 +446,11 @@ UnsignedInt INI::load( AsciiString filename, INILoadType loadType, Xfer *pXfer )
 						char buff[1024];
 						snprintf(buff, ARRAY_SIZE(buff), "Error parsing INI file '%s' (Line: '%s')\n",
 							m_filename.str(), currentLine.str());
+						// GeneralsX @debug web-port 05/07/2026 Release builds swallow
+						// DEBUG_CRASH; always surface the failing block and line.
+						fprintf(stderr, "[INI] ERROR parsing block '%s' at line %d: '%s'\n",
+							token, getLineNum(), currentLine.str());
+						fflush(stderr);
 
 						throw INIException(buff);
 					}
@@ -457,6 +462,10 @@ UnsignedInt INI::load( AsciiString filename, INILoadType loadType, Xfer *pXfer )
 				{
 					DEBUG_CRASH( ("[LINE: %d - FILE: '%s'] Unknown block '%s'",
 														 getLineNum(), getFilename().str(), token ) );
+					// GeneralsX @debug web-port 05/07/2026 Surface in release too.
+					fprintf(stderr, "[INI] ERROR unknown block '%s' at line %d (line text: '%.120s')\n",
+						token, getLineNum(), currentLine.str());
+					fflush(stderr);
 					throw INI_UNKNOWN_TOKEN;
 				}
 
@@ -888,7 +897,16 @@ void INI::parseAndTranslateLabel( INI* ini, void * /*instance*/, void *store, co
 	// translate
 	UnicodeString translated = TheGameText->fetch( token );
 	if( translated.isEmpty() )
-		throw INI_INVALID_DATA;
+	{
+		// GeneralsX @bugfix web-port 05/07/2026 Localization repacks can carry
+		// labels with EMPTY values (seen: GUI:SaveView5Description in a Russian
+		// CSF); the retail throw here aborts the whole INI load and kills
+		// startup. Degrade to the same "MISSING:" placeholder fetch() uses for
+		// absent labels instead - a blank tooltip beats a dead game.
+		fprintf(stderr, "WARNING: INI::parseAndTranslateLabel - empty translation for '%s', using placeholder\n",
+			token ? token : "(null)");
+		translated.format(L"MISSING: '%hs'", token ? token : "(null)");
+	}
 
 	// save the translated text
 	UnicodeString *theString = (UnicodeString *)store;

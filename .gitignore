@@ -99,3 +99,4 @@ ios/GeneralsXZH.xcodeproj/
 
 # Web port build artifacts (assembled by scripts/web/make-dist.sh)
 web/dist/
+web/gamedata/

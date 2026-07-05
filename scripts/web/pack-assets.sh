@@ -49,7 +49,7 @@ if [ -d "$SRC/fonts" ]; then
 elif [ -x "$REPO_ROOT/scripts/build/ios/stage-fonts.sh" ]; then
     # Reuse the iOS font stager (Liberation fonts renamed to the faces the
     # game asks for). It stages into the dir given as $1.
-    "$REPO_ROOT/scripts/build/ios/stage-fonts.sh" "$FONTS_DIR" || {
+    GX_FONTS="$FONTS_DIR" "$REPO_ROOT/scripts/build/ios/stage-fonts.sh" || {
         echo "WARNING: stage-fonts.sh failed; place arial.ttf into $FONTS_DIR manually" >&2
     }
 else

@@ -42,8 +42,12 @@ func main() {
 		p := r.URL.Path
 		switch {
 		case strings.HasSuffix(p, ".wasm"):
+			// no-cache = revalidate every load (304 when unchanged): a deploy
+			// must never pair a cached old .js with a new .wasm.
 			h.Set("Content-Type", "application/wasm")
-			h.Set("Cache-Control", "public, max-age=86400")
+			h.Set("Cache-Control", "no-cache")
+		case strings.HasSuffix(p, "GeneralsXZH.js"):
+			h.Set("Cache-Control", "no-cache")
 		case strings.HasPrefix(p, "/assets/files/"):
 			// The loader appends ?v=<sha> - long cache is safe.
 			h.Set("Cache-Control", "public, max-age=31536000, immutable")

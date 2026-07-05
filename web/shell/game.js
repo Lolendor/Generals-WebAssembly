@@ -15,19 +15,32 @@ function gxGameArguments() {
   return raw.split(' ').filter(Boolean);
 }
 
-function gxStartGame() {
+async function gxStartGame() {
+  // Cache-buster for the engine code on dumb static hosts: browsers must
+  // never pair a stale cached GeneralsXZH.js with a newer .wasm.
+  let buildId = 'dev';
+  try {
+    const r = await fetch('build.json', { cache: 'no-cache' });
+    if (r.ok) buildId = (await r.json()).buildId || 'dev';
+  } catch {}
+
   return new Promise((resolve, reject) => {
     const canvas = document.getElementById('canvas');
 
     window.Module = {
       canvas: canvas,
       arguments: gxGameArguments(),
-      locateFile: (f) => f, // relative: wasm lives next to index.html
+      locateFile: (f) => f + '?v=' + buildId, // relative: wasm lives next to index.html
       // 0 = OPFS (WASMFS OPFS backend), 1 = IndexedDB (js-file backend +
       // population from window.gxFiles). Read by WebMain.cpp.
       gxStorageMode: window.gxStorageKind === 'idb' ? 1 : 0,
       print: (t) => console.log('[game]', t),
-      printErr: (t) => console.warn('[game]', t),
+      printErr: (t) => {
+        // Drop known per-frame spam (same filter the iOS port uses in its
+        // log sink) - keeps the console usable during real sessions.
+        if (t.startsWith('[GX-ISSUE144]') || t.startsWith('[INI] ')) return;
+        console.warn('[game]', t);
+      },
       onRuntimeInitialized: () => {
         console.log('[game] runtime initialized');
         resolve();
@@ -45,7 +58,7 @@ function gxStartGame() {
     };
 
     const s = document.createElement('script');
-    s.src = 'GeneralsXZH.js';
+    s.src = 'GeneralsXZH.js?v=' + buildId;
     s.onerror = () => reject(new Error('Не удалось загрузить GeneralsXZH.js'));
     document.body.appendChild(s);
   });
