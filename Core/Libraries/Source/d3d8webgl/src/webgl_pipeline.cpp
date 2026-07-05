@@ -1031,13 +1031,11 @@ void WebGLPipeline::applyFixedState(WebGLDevice *dev)
 		glDisable(GL_POLYGON_OFFSET_FILL);
 	}
 
-	// Color mask
+	// Color mask. Zero is a real value: stencil shadow volumes render with
+	// COLORWRITEENABLE=0 (stencil-only) - mapping it to "write everything"
+	// made every shadow volume a visible black silhouette.
 	const DWORD cw = dev->getRenderState(D3DRS_COLORWRITEENABLE);
-	if (cw != 0 && cw != 0xF) {
-		glColorMask((cw & 1) != 0, (cw & 2) != 0, (cw & 4) != 0, (cw & 8) != 0);
-	} else {
-		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-	}
+	glColorMask((cw & 1) != 0, (cw & 2) != 0, (cw & 4) != 0, (cw & 8) != 0);
 
 	// Stencil
 	if (dev->getRenderState(D3DRS_STENCILENABLE)) {
@@ -1054,11 +1052,15 @@ void WebGLPipeline::applyFixedState(WebGLDevice *dev)
 		glDisable(GL_STENCIL_TEST);
 	}
 
-	// Viewport (D3D top-left origin -> GL bottom-left; uniform convention
-	// everywhere since the clip-space y-flip applies to FBOs too)
+	// Viewport position. The uniform clip-space y-negate makes every render
+	// target D3D-oriented (texel row 0 = top row of the D3D frame), so the
+	// viewport rectangle must be placed from the TOP, i.e. at vp.Y directly.
+	// The classic GL bottom-up flip here double-flipped partial viewports:
+	// full-screen ones (Y=0, H=RT) are unaffected, but the in-game 3D view
+	// (top portion of the screen) rendered shifted DOWN by RTH-H, leaving a
+	// black band on top and offsetting picking by the same amount.
 	const D3DVIEWPORT8 &vp = dev->getViewport();
-	GLint vy = (GLint)(m_curRTHeight - ((int)vp.Y + (int)vp.Height));
-	glViewport((GLint)vp.X, vy, (GLsizei)vp.Width, (GLsizei)vp.Height);
+	glViewport((GLint)vp.X, (GLint)vp.Y, (GLsizei)vp.Width, (GLsizei)vp.Height);
 	glDepthRangef(vp.MinZ, vp.MaxZ);
 }
 
@@ -1219,6 +1221,43 @@ void WebGLPipeline::drawCommon(WebGLDevice *dev, unsigned primType, unsigned pri
 	ProgramInfo *prog = getProgram(dev, fvf);
 	if (!prog || !prog->prog) return;
 
+	// 2D-alpha telemetry: log unique blend/alpha-combiner states of textured
+	// 2D draws (identity projection = UI paths) to chase opaque-where-
+	// transparent rendering.
+	if (dev->getTransform(D3DTS_PROJECTION)._11 == 1.0f) {
+		WebGLTexture *t0 = dev->getTexture2D(0);
+		if (t0) {
+			static uint64_t s_seen[24];
+			static int s_seenCnt = 0;
+			const uint64_t sig =
+				(uint64_t)dev->getRenderState(D3DRS_ALPHABLENDENABLE) |
+				((uint64_t)dev->getRenderState(D3DRS_SRCBLEND) << 1) |
+				((uint64_t)dev->getRenderState(D3DRS_DESTBLEND) << 6) |
+				((uint64_t)dev->getRenderState(D3DRS_ALPHATESTENABLE) << 11) |
+				((uint64_t)dev->getStageState(0, D3DTSS_ALPHAOP) << 12) |
+				((uint64_t)dev->getStageState(0, D3DTSS_ALPHAARG1) << 18) |
+				((uint64_t)dev->getStageState(0, D3DTSS_COLOROP) << 24) |
+				((uint64_t)(t0->m_format & 0xFF) << 32);
+			bool known = false;
+			for (int i = 0; i < s_seenCnt; i++) if (s_seen[i] == sig) { known = true; break; }
+			if (!known && s_seenCnt < 24) {
+				s_seen[s_seenCnt++] = sig;
+				fprintf(stderr,
+					"[d3d8webgl] ui#%d rhw=%d blend=%lu src=%lu dst=%lu atest=%lu aop=%lu aarg1=%lu cop=%lu carg1=%lu fmt=%d %ux%u\n",
+					s_seenCnt, l.xyzrhw ? 1 : 0,
+					(unsigned long)dev->getRenderState(D3DRS_ALPHABLENDENABLE),
+					(unsigned long)dev->getRenderState(D3DRS_SRCBLEND),
+					(unsigned long)dev->getRenderState(D3DRS_DESTBLEND),
+					(unsigned long)dev->getRenderState(D3DRS_ALPHATESTENABLE),
+					(unsigned long)dev->getStageState(0, D3DTSS_ALPHAOP),
+					(unsigned long)dev->getStageState(0, D3DTSS_ALPHAARG1),
+					(unsigned long)dev->getStageState(0, D3DTSS_COLOROP),
+					(unsigned long)dev->getStageState(0, D3DTSS_COLORARG1),
+					(int)t0->m_format, t0->m_levels[0]->m_width, t0->m_levels[0]->m_height);
+			}
+		}
+	}
+
 	// 3D-draw telemetry: perspective draws only (terrain/meshes), the 2D UI
 	// spam has identity projection and is skipped.
 	static int s_drawLog = 0;
@@ -1375,8 +1414,8 @@ void WebGLPipeline::clear(WebGLDevice *dev, unsigned flags, uint32_t argb, float
 	                   (int)vp.Width == m_curRTWidth && (int)vp.Height == m_curRTHeight);
 	if (!full) {
 		glEnable(GL_SCISSOR_TEST);
-		glScissor((GLint)vp.X, (GLint)(m_curRTHeight - ((int)vp.Y + (int)vp.Height)),
-		          (GLsizei)vp.Width, (GLsizei)vp.Height);
+		// Same top-origin placement as the glViewport call in applyFixedState.
+		glScissor((GLint)vp.X, (GLint)vp.Y, (GLsizei)vp.Width, (GLsizei)vp.Height);
 	}
 
 	GLbitfield mask = 0;

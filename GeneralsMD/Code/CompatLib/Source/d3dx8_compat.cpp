@@ -293,8 +293,14 @@ D3DXFilterTexture(
 				// Copy the data
 				D3DXLoadSurfaceFromSurface(mipsurf, NULL, NULL, topsurf, NULL, NULL, Filter, 0);
 
-				// Release the surface
-				mipsurf->Release();
+				// GeneralsX @bugfix web-port 06/07/2026 Release the level we are DONE with
+				// (the previous source), not the one we keep using. The old code released
+				// mipsurf and then kept it as topsurf, and released it AGAIN after the
+				// loop - a double release of the last mip level. DXVK tolerates that
+				// (level surfaces are privately owned by their texture); a plain
+				// delete-on-zero D3D8 implementation frees a surface the texture still
+				// owns, corrupting the heap when the texture is destroyed.
+				topsurf->Release();
 				topsurf = mipsurf;
 
 				Level++;

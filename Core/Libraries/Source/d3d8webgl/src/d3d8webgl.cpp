@@ -164,7 +164,26 @@ public:
 		m_bits.resize(m_size);
 	}
 
-	D3D8WEBGL_IUNKNOWN_IMPL(WebGLSurface)
+	// Manual IUnknown: texture-level views are privately owned by their
+	// texture (deleted in its dtor), NOT by the public refcount. Game-era
+	// D3DX code over-releases level surfaces (see D3DXFilterTexture); real
+	// runtimes and DXVK tolerate that, so this layer must too.
+	HRESULT QueryInterface(REFIID /*riid*/, void **ppvObject) override
+	{
+		if (ppvObject == nullptr) return E_POINTER;
+		*ppvObject = this;
+		AddRef();
+		return S_OK;
+	}
+	ULONG AddRef() override { return ++m_ref; }
+	ULONG Release() override
+	{
+		const ULONG r = --m_ref;
+		if (r == 0 && !m_textureOwned) delete this;
+		return r;
+	}
+	ULONG m_ref = 1;
+	bool m_textureOwned = false; // lifetime bound to the owning texture
 
 	HRESULT GetDevice(struct IDirect3DDevice8 **ppDevice) override;
 	HRESULT SetPrivateData(REFGUID, const void *, DWORD, DWORD) override { return D3D_OK; }
@@ -262,6 +281,7 @@ public:
 			WebGLSurface *lvl = new WebGLSurface(dev, tw, th, fmt, D3DRTYPE_TEXTURE);
 			lvl->m_ownerGL = &m_gl;
 			lvl->m_ownerTex = this;
+			lvl->m_textureOwned = true;
 			m_levels.push_back(lvl);
 			tw = tw > 1 ? tw / 2 : 1;
 			th = th > 1 ? th / 2 : 1;
@@ -271,7 +291,7 @@ public:
 	~WebGLTexture()
 	{
 		for (WebGLSurface *s : m_levels) {
-			s->Release();
+			delete s; // privately owned; public refcount does not delete these
 		}
 	}
 
@@ -356,7 +376,9 @@ public:
 		for (UINT f = 0; f < 6; f++) {
 			UINT e = edge;
 			for (UINT i = 0; i < levels; i++) {
-				m_faces[f].push_back(new WebGLSurface(dev, e, e, fmt, D3DRTYPE_CUBETEXTURE));
+				WebGLSurface *s = new WebGLSurface(dev, e, e, fmt, D3DRTYPE_CUBETEXTURE);
+				s->m_textureOwned = true;
+				m_faces[f].push_back(s);
 				e = e > 1 ? e / 2 : 1;
 			}
 		}
@@ -366,7 +388,7 @@ public:
 	{
 		for (auto &face : m_faces) {
 			for (WebGLSurface *s : face) {
-				s->Release();
+				delete s; // privately owned; public refcount does not delete these
 			}
 		}
 	}
@@ -709,6 +731,11 @@ public:
 			m_transforms[i]._11 = m_transforms[i]._22 = 1.0f;
 			m_transforms[i]._33 = m_transforms[i]._44 = 1.0f;
 		}
+		// Non-zero D3D render-state defaults the engine relies on. In
+		// particular COLORWRITEENABLE defaults to all channels; a zero here
+		// must mean "the game explicitly disabled color writes" (stencil
+		// shadow volume passes), which the pipeline honors as an all-off mask.
+		m_renderStates[D3DRS_COLORWRITEENABLE] = 0xF;
 		// Phase 2: bring up the WebGL2 pipeline on the canvas.
 		WebGLPipeline::get()->initContext((int)m_pp.BackBufferWidth, (int)m_pp.BackBufferHeight);
 	}
@@ -1587,14 +1614,24 @@ public:
 
 	UINT GetAdapterModeCount(UINT adapter) override
 	{
-		return adapter == 0 ? kModeCount : 0;
+		return adapter == 0 ? kModeCount + 1 : 0;
 	}
 
 	HRESULT EnumAdapterModes(UINT adapter, UINT mode, D3DDISPLAYMODE *pMode) override
 	{
-		if (!pMode || adapter != 0 || mode >= kModeCount) return D3DERR_INVALIDCALL;
-		pMode->Width = kModes[mode][0];
-		pMode->Height = kModes[mode][1];
+		if (!pMode || adapter != 0 || mode >= kModeCount + 1) return D3DERR_INVALIDCALL;
+		if (mode == 0) {
+			// The native (canvas) mode MUST be enumerable: DX8Wrapper's
+			// Find_Color_Mode requires an EXACT width/height match to accept a
+			// 32-bit backbuffer format - without this entry the engine fell
+			// back to BitDepth=16 and every texture in the game degraded to
+			// R5G6B5/A4R4G4B4/A1R5G5B5 (killing most alpha channels).
+			pMode->Width = (UINT)s_nativeModeW;
+			pMode->Height = (UINT)s_nativeModeH;
+		} else {
+			pMode->Width = kModes[mode - 1][0];
+			pMode->Height = kModes[mode - 1][1];
+		}
 		pMode->RefreshRate = 60;
 		pMode->Format = D3DFMT_X8R8G8B8;
 		return D3D_OK;
@@ -1603,14 +1640,16 @@ public:
 	HRESULT GetAdapterDisplayMode(UINT adapter, D3DDISPLAYMODE *pMode) override
 	{
 		if (!pMode || adapter != 0) return D3DERR_INVALIDCALL;
-		// Phase 2: query the real canvas size. 1024x768 matches the SDL window
-		// WebMain.cpp creates.
-		pMode->Width = 1024;
-		pMode->Height = 768;
+		pMode->Width = (UINT)s_nativeModeW;
+		pMode->Height = (UINT)s_nativeModeH;
 		pMode->RefreshRate = 60;
 		pMode->Format = D3DFMT_X8R8G8B8;
 		return D3D_OK;
 	}
+
+	// Set from WebMain before the device is created (see d3d8webgl_set_native_mode).
+	static int s_nativeModeW;
+	static int s_nativeModeH;
 
 	HRESULT CheckDeviceType(UINT adapter, D3DDEVTYPE, D3DFORMAT, D3DFORMAT, WINBOOL) override
 	{
@@ -1695,6 +1734,20 @@ private:
 };
 
 constexpr UINT WebGLDirect3D8::kModes[WebGLDirect3D8::kModeCount][2];
+
+int WebGLDirect3D8::s_nativeModeW = 1024;
+int WebGLDirect3D8::s_nativeModeH = 768;
+
+// Called from WebMain once the real canvas size is known (before GameMain
+// creates the device), so mode enumeration matches the -xres/-yres the game
+// will ask for.
+extern "C" void d3d8webgl_set_native_mode(int w, int h)
+{
+	if (w > 0 && h > 0) {
+		WebGLDirect3D8::s_nativeModeW = w;
+		WebGLDirect3D8::s_nativeModeH = h;
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Entry point (statically linked; called by DX8Wrapper::Init on Emscripten)

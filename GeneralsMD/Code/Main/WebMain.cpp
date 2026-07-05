@@ -51,6 +51,9 @@
 #include <unistd.h>   // _exit(), chdir()
 #include <sys/stat.h>
 
+// d3d8webgl: native display mode published before device creation.
+extern "C" void d3d8webgl_set_native_mode(int w, int h);
+
 // USER INCLUDES (match SDL3Main.cpp pattern)
 #include "Lib/BaseType.h"
 #include "Common/CommandLine.h"
@@ -340,6 +343,11 @@ int main(int argc, char* argv[])
 				}
 				int winW = 0, winH = 0;
 				SDL_GetWindowSizeInPixels(TheSDL3Window, &winW, &winH);
+				// Publish the native mode to d3d8webgl BEFORE the device is
+				// created: DX8Wrapper only accepts a 32-bit backbuffer if mode
+				// enumeration contains this exact resolution (else the whole
+				// game degrades to 16-bit textures).
+				d3d8webgl_set_native_mode(winW & ~1, winH & ~1);
 				if (!userSetRes && winW >= 640 && winH >= 480) {
 					static char xresVal[16], yresVal[16];
 					static char xresFlag[] = "-xres";
