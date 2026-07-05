@@ -54,6 +54,11 @@
 // d3d8webgl: native display mode published before device creation.
 extern "C" void d3d8webgl_set_native_mode(int w, int h);
 
+// libavutil (FFmpeg): silence swscale's per-open INFO chatter about missing
+// SIMD paths - wasm has none by definition. Declared here to avoid pulling
+// FFmpeg headers into the entry point; the C ABI is stable.
+extern "C" void av_log_set_level(int level);
+
 // USER INCLUDES (match SDL3Main.cpp pattern)
 #include "Lib/BaseType.h"
 #include "Common/CommandLine.h"
@@ -370,6 +375,10 @@ int main(int argc, char* argv[])
 				}
 			}
 		}
+
+		// FFmpeg: errors only (16 = AV_LOG_ERROR). Some video paths create
+		// swscale contexts before FFmpegFile::open() runs, so set it here.
+		av_log_set_level(16);
 
 		// Call cross-platform game entry point
 		exitcode = GameMain();

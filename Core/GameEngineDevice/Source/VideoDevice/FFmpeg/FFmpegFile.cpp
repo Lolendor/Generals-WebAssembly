@@ -52,7 +52,12 @@ Bool FFmpegFile::open(File *file)
 	DEBUG_ASSERTCRASH(m_file == nullptr, ("already open"));
 	DEBUG_ASSERTCRASH(file != nullptr, ("null file pointer"));
 	m_atEof = false;  // GeneralsX @bugfix 14/06/2026 fresh stream is not at EOF
-#if LOGGING_LEVEL != LOGLEVEL_NONE
+#if defined(__EMSCRIPTEN__)
+	// GeneralsX @build web-port 06/07/2026 swscale INFO-chats about missing
+	// SIMD paths ("No accelerated colorspace conversion...") on every video
+	// open; wasm has no accelerated paths by definition, so errors only.
+	av_log_set_level(AV_LOG_ERROR);
+#elif LOGGING_LEVEL != LOGLEVEL_NONE
 	av_log_set_level(AV_LOG_INFO);
 #endif
 

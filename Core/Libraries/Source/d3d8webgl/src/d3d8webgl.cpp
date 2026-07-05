@@ -231,17 +231,6 @@ public:
 	HRESULT UnlockRect() override
 	{
 		if (m_ownerGL) m_ownerGL->dirty = true;
-		if (m_width >= 1024) {
-			static int s_ulLog = 0;
-			if (s_ulLog < 10) {
-				s_ulLog++;
-				size_t nz = 0;
-				for (size_t i = 0; i < m_bits.size(); i += 16) nz += (m_bits[i] != 0);
-				fprintf(stderr, "[d3d8webgl] surfUnlock#%d %ux%u fmt=%d owner=%p glname=%u nz~%zu/%zu\n",
-					s_ulLog, m_width, m_height, (int)m_format, (void *)m_ownerGL,
-					m_ownerGL ? m_ownerGL->name : 0, nz, m_bits.size() / 16);
-			}
-		}
 		return D3D_OK;
 	}
 
@@ -819,11 +808,6 @@ public:
 	HRESULT GetBackBuffer(UINT, D3DBACKBUFFER_TYPE, IDirect3DSurface8 **ppBackBuffer) override
 	{
 		if (!ppBackBuffer) return D3DERR_INVALIDCALL;
-		static int s_bbLog = 0;
-		if (s_bbLog < 8) {
-			s_bbLog++;
-			fprintf(stderr, "[d3d8webgl] GetBackBuffer#%d\n", s_bbLog);
-		}
 		m_backBuffer->AddRef();
 		*ppBackBuffer = m_backBuffer;
 		return D3D_OK;
@@ -982,14 +966,6 @@ public:
 
 	HRESULT SetRenderTarget(IDirect3DSurface8 *pRenderTarget, IDirect3DSurface8 *pNewZStencil) override
 	{
-		static int s_rtLog = 0;
-		if (s_rtLog < 12 && pRenderTarget) {
-			s_rtLog++;
-			WebGLSurface *rt = static_cast<WebGLSurface *>(pRenderTarget);
-			fprintf(stderr, "[d3d8webgl] SetRenderTarget#%d %ux%u fmt=%d owner=%d (backbuf=%d)\n",
-				s_rtLog, rt->m_width, rt->m_height, (int)rt->m_format,
-				rt->m_ownerGL ? 1 : 0, rt == m_backBuffer ? 1 : 0);
-		}
 		if (pRenderTarget) {
 			pRenderTarget->AddRef();
 			if (m_currentRT) m_currentRT->Release();
