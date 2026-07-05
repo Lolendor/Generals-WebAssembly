@@ -725,6 +725,10 @@ public:
 		// must mean "the game explicitly disabled color writes" (stencil
 		// shadow volume passes), which the pipeline honors as an all-off mask.
 		m_renderStates[D3DRS_COLORWRITEENABLE] = 0xF;
+		m_renderStates[D3DRS_COLORVERTEX] = TRUE;
+		m_renderStates[D3DRS_DIFFUSEMATERIALSOURCE] = D3DMCS_COLOR1;
+		m_renderStates[D3DRS_SPECULARMATERIALSOURCE] = D3DMCS_COLOR2;
+		// AMBIENT/EMISSIVEMATERIALSOURCE default to D3DMCS_MATERIAL (0).
 		// Phase 2: bring up the WebGL2 pipeline on the canvas.
 		WebGLPipeline::get()->initContext((int)m_pp.BackBufferWidth, (int)m_pp.BackBufferHeight);
 	}

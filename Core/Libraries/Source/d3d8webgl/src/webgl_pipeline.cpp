@@ -360,6 +360,17 @@ uint64_t WebGLPipeline::computeProgramKey(WebGLDevice *dev, unsigned fvf) const
 	const bool lighting = dev->getRenderState(D3DRS_LIGHTING) != 0 && l.hasNormal && !l.xyzrhw;
 	put(lighting ? 1 : 0, 1);
 
+	// Material color sources (VertexMaterialClass::Apply drives these; the
+	// W3D default is MATERIAL - skinned meshes carry diffuse=0 in the VB).
+	if (lighting) {
+		const bool cv = dev->getRenderState(D3DRS_COLORVERTEX) != 0 && l.hasDiffuse;
+		put((cv && dev->getRenderState(D3DRS_DIFFUSEMATERIALSOURCE) == 1 /*COLOR1*/) ? 1 : 0, 1);
+		put((cv && dev->getRenderState(D3DRS_AMBIENTMATERIALSOURCE) == 1) ? 1 : 0, 1);
+		put((cv && dev->getRenderState(D3DRS_EMISSIVEMATERIALSOURCE) == 1) ? 1 : 0, 1);
+	} else {
+		put(0, 3);
+	}
+
 	const bool fog = dev->getRenderState(D3DRS_FOGENABLE) != 0 && !l.xyzrhw;
 	put(fog ? 1 : 0, 1);
 
@@ -392,7 +403,8 @@ uint64_t WebGLPipeline::computeProgramKey(WebGLDevice *dev, unsigned fvf) const
 		put(sk.texgen, 1);
 		put(sk.xform ? 1 : 0, 1);
 	}
-	return key | (1ull << 63); // non-zero marker
+	// XOR keeps the mapping bijective now that the packed bits fill all 64.
+	return key ^ 0x9E3779B97F4A7C15ull;
 }
 
 // arg index (masked 0x7): 0=DIFFUSE(via current at st0) 1=CURRENT 2=TEXTURE 3=TFACTOR 4=SPECULAR
@@ -491,6 +503,12 @@ WebGLPipeline::ProgramInfo *WebGLPipeline::getProgram(WebGLDevice *dev, unsigned
 	FVFLayout l;
 	parseFVF(fvf, &l);
 	const bool lighting = dev->getRenderState(D3DRS_LIGHTING) != 0 && l.hasNormal && !l.xyzrhw;
+	// D3DMCS_COLOR1 == 1; VertexMaterialClass::Apply drives these states and
+	// the W3D default is MATERIAL (skinned meshes carry diffuse=0 in the VB).
+	const bool cvOn = dev->getRenderState(D3DRS_COLORVERTEX) != 0 && l.hasDiffuse;
+	const bool diffFromVertex = lighting && cvOn && dev->getRenderState(D3DRS_DIFFUSEMATERIALSOURCE) == 1;
+	const bool ambFromVertex = lighting && cvOn && dev->getRenderState(D3DRS_AMBIENTMATERIALSOURCE) == 1;
+	const bool emisFromVertex = lighting && cvOn && dev->getRenderState(D3DRS_EMISSIVEMATERIALSOURCE) == 1;
 	const bool fog = dev->getRenderState(D3DRS_FOGENABLE) != 0 && !l.xyzrhw;
 	const bool alphaTest = dev->getRenderState(D3DRS_ALPHATESTENABLE) != 0;
 	const unsigned alphaFunc = dev->getRenderState(D3DRS_ALPHAFUNC) ? dev->getRenderState(D3DRS_ALPHAFUNC) : D3DCMP_ALWAYS;
@@ -555,12 +573,14 @@ WebGLPipeline::ProgramInfo *WebGLPipeline::getProgram(WebGLDevice *dev, unsigned
 	// Diffuse color: vertex color (BGRA attribute swizzle) / lighting / white.
 	if (lighting) {
 		vs += "  vec3 wnrm = normalize(mat3(uWorld) * aNormal);\n";
-		if (l.hasDiffuse) {
-			vs += "  vec4 matDiff = aColor0.zyxw;\n"; // COLORVERTEX default: color1 as diffuse
-		} else {
-			vs += "  vec4 matDiff = uMatDiffuse;\n";
-		}
-		vs += "  vec3 accum = uMatEmissive.rgb + uGlobalAmbient.rgb * uMatAmbient.rgb;\n";
+		// Material color sources per D3DRS_*MATERIALSOURCE (COLOR1 = vertex).
+		vs += diffFromVertex ? "  vec4 matDiff = aColor0.zyxw;\n"
+		                     : "  vec4 matDiff = uMatDiffuse;\n";
+		vs += ambFromVertex ? "  vec3 matAmb = aColor0.zyx;\n"
+		                    : "  vec3 matAmb = uMatAmbient.rgb;\n";
+		vs += emisFromVertex ? "  vec3 matEmis = aColor0.zyx;\n"
+		                     : "  vec3 matEmis = uMatEmissive.rgb;\n";
+		vs += "  vec3 accum = matEmis + uGlobalAmbient.rgb * matAmb;\n";
 		vs += "  for (int i = 0; i < uNumLights; i++) {\n";
 		vs += "    vec3 L; float atten = 1.0;\n";
 		vs += "    if (uLightType[i] == 1) {\n"; // POINT
@@ -570,7 +590,7 @@ WebGLPipeline::ProgramInfo *WebGLPipeline::getProgram(WebGLDevice *dev, unsigned
 		vs += "      atten = 1.0 / (uLightAtten[i].y + uLightAtten[i].z * dist + uLightAtten[i].w * dist * dist);\n";
 		vs += "    } else { L = -uLightDir[i]; }\n";
 		vs += "    float ndl = max(dot(wnrm, L), 0.0);\n";
-		vs += "    accum += uLightAmbient[i].rgb * uMatAmbient.rgb * atten;\n";
+		vs += "    accum += uLightAmbient[i].rgb * matAmb * atten;\n";
 		vs += "    accum += uLightDiffuse[i].rgb * matDiff.rgb * ndl * atten;\n";
 		vs += "  }\n";
 		vs += "  vCol = vec4(clamp(accum, 0.0, 1.0), matDiff.a);\n";
@@ -1190,6 +1210,33 @@ void WebGLPipeline::drawCommon(WebGLDevice *dev, unsigned primType, unsigned pri
 
 	ProgramInfo *prog = getProgram(dev, fvf);
 	if (!prog || !prog->prog) return;
+
+	// mul# telemetry: multiply passes (lightmap/cloud, blend DESTCOLOR x ZERO)
+	// darken to black when their texture is empty - dump what they multiply by.
+	if (dev->getRenderState(D3DRS_ALPHABLENDENABLE) &&
+	    dev->getRenderState(D3DRS_SRCBLEND) == D3DBLEND_DESTCOLOR &&
+	    dev->getRenderState(D3DRS_DESTBLEND) == D3DBLEND_ZERO) {
+		static int s_mulLog = 0;
+		if (s_mulLog < 10) {
+			s_mulLog++;
+			WebGLTexture *t0 = dev->getTexture2D(0);
+			size_t nz = 0, tot = 0;
+			if (t0 && !t0->m_levels.empty()) {
+				const auto &bits = t0->m_levels[0]->m_bits;
+				tot = bits.size() / 16;
+				for (size_t i = 0; i < bits.size(); i += 16) nz += (bits[i] != 0);
+			}
+			fprintf(stderr,
+				"[d3d8webgl] mul#%d fvf=0x%x cnt=%u tex=%s fmt=%d %ux%u nz~%zu/%zu cop=%lu carg1=%lu light=%lu\n",
+				s_mulLog, fvf, primCount, t0 ? "Y" : "n",
+				t0 ? (int)t0->m_format : -1,
+				t0 ? t0->m_levels[0]->m_width : 0, t0 ? t0->m_levels[0]->m_height : 0,
+				nz, tot,
+				(unsigned long)dev->getStageState(0, D3DTSS_COLOROP),
+				(unsigned long)dev->getStageState(0, D3DTSS_COLORARG1),
+				(unsigned long)dev->getRenderState(D3DRS_LIGHTING));
+		}
+	}
 
 	applyFixedState(dev);
 	applyUniforms(dev, prog, fvf);
