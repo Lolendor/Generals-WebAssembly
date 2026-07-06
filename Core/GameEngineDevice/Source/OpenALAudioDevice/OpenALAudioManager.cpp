@@ -2945,6 +2945,15 @@ void OpenALAudioManager::playStream(AudioEventRTS* event, OpenALAudioStream* str
 		//alSourcei(stream->getSource(), AL_LOOPING, AL_TRUE);
 	}
 
+	// GeneralsX @bugfix web-port 06/07/2026 Apply the category volume BEFORE the
+	// first play (fresh sources default to gain 1.0; music/speech popped loud).
+	{
+		const Real desiredVolume = event->getVolume() * event->getVolumeShift();
+		const Real categoryVolume =
+			(event->getAudioEventInfo()->m_soundType == AT_Music) ? m_musicVolume : m_speechVolume;
+		alSourcef(stream->getSource(), AL_GAIN, categoryVolume * desiredVolume);
+	}
+
 	stream->play();
 	if (event->getAudioEventInfo()->m_soundType == AT_Music) {
 		// Need to stop/fade out the old music here.
@@ -2959,6 +2968,11 @@ ALuint OpenALAudioManager::playSample(AudioEventRTS* event, PlayingAudio* audio)
 	if (bufferHandle) {
 		alSourcei(audio->m_source, AL_SOURCE_RELATIVE, AL_TRUE);
 		alSourcei(audio->m_source, AL_BUFFER, (ALuint)(uintptr_t)bufferHandle);
+		// GeneralsX @bugfix web-port 06/07/2026 Fresh sources default to gain 1.0 and the
+		// periodic adjustPlayingVolume only runs on the NEXT audio update - every sound
+		// started at full blast for a few ms (loud pops, ignoring the volume options).
+		// Apply the category volume before starting playback.
+		alSourcef(audio->m_source, AL_GAIN, m_soundVolume * event->getVolume() * event->getVolumeShift());
 		alSourcePlay(audio->m_source);
 	}
 
@@ -3015,6 +3029,10 @@ ALuint OpenALAudioManager::playSample3D(AudioEventRTS* event, PlayingAudio* samp
 			}
 			alSourcei(source, AL_BUFFER, handle);
 			DEBUG_LOG(("Playing 3D sample '%s' at %f, %f, %f\n", event->getEventName().str(), x, y, z));
+
+			// GeneralsX @bugfix web-port 06/07/2026 Apply the category volume BEFORE
+			// starting playback (see playSample) - fresh sources default to 1.0.
+			alSourcef(source, AL_GAIN, m_sound3DVolume * event->getVolume() * event->getVolumeShift());
 
 			// Start playback
 			alSourcePlay(source);

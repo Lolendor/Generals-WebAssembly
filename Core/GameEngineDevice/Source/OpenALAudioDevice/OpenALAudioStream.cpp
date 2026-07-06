@@ -122,6 +122,17 @@ void OpenALAudioStream::update()
     // GeneralsX @bugfix 14/06/2026 ...but NOT once the stream is at true EOF: a finished one-shot
     // speech (taunt) must be allowed to reach a stable AL_STOPPED so its disallowSpeech flag clears.
     if ((sourceState == AL_STOPPED || sourceState == AL_INITIAL || sourceState == AL_PAUSED) && num_queued > 0 && !m_endOfData) {
+#ifdef __EMSCRIPTEN__
+        // GeneralsX @build web-port 06/07/2026 Count stream underruns so audio
+        // stutter reports are attributable (visible in the browser console).
+        if (sourceState == AL_STOPPED) {
+            static int s_underruns = 0;
+            s_underruns++;
+            if (s_underruns <= 20 || (s_underruns % 25) == 0) {
+                fprintf(stderr, "[audio] stream underrun #%d (queued=%d)\n", s_underruns, (int)num_queued);
+            }
+        }
+#endif
         play();
         alGetSourcei(m_source, AL_SOURCE_STATE, &sourceState);
     }
@@ -155,12 +166,20 @@ void OpenALAudioStream::update()
     alGetSourcei(m_source, AL_BUFFERS_QUEUED, &num_queued);
     DEBUG_LOG(("Having %i buffers queued\n", num_queued));
 
-    if (num_queued < AL_STREAM_BUFFER_COUNT / 2 && m_requireDataCallback && !m_endOfData) {
+#ifdef __EMSCRIPTEN__
+    // GeneralsX @build web-port 06/07/2026 Larger in-flight margin on web: AL
+    // calls are proxied to the main thread, whose scheduling jitter (tab
+    // compositing, GC) can exceed the native margin.
+    const ALint kRefillTarget = (AL_STREAM_BUFFER_COUNT * 3) / 4;
+#else
+    // Only fill up to the half, because some formats can output
+    // more than one buffer per decoded frame.
+    const ALint kRefillTarget = AL_STREAM_BUFFER_COUNT / 2;
+#endif
+    if (num_queued < kRefillTarget && m_requireDataCallback && !m_endOfData) {
         // GeneralsX @bugfix BenderAI 22/04/2026 Do not fake queue growth when callback fails to enqueue data.
         // Ask for more data to be buffered.
-        // Only fill up to the half, because some formats can output
-        // more than one buffer per decoded frame.
-        while (num_queued < AL_STREAM_BUFFER_COUNT / 2) {
+        while (num_queued < kRefillTarget) {
             // GeneralsX @bugfix 14/06/2026 callback returns FALSE at true end-of-file (no more
             // data will ever come). Latch m_endOfData so we stop restarting the drained source
             // and let it finish. A transient decode error still returns TRUE, so a stutter/underrun
