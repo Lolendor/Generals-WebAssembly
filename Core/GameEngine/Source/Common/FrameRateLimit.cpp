@@ -43,24 +43,9 @@ FrameRateLimit::FrameRateLimit()
 #endif
 }
 
-#ifdef __EMSCRIPTEN__
-// GeneralsX @build web-port 06/07/2026 Loader FPS setting. Applied here (not
-// via -fps) because in-game code rewrites m_framesPerSecondLimit - e.g. the
-// skirmish game-speed slider clamps it back to 15..61 on match start.
-static UnsignedInt s_gxWebFpsOverride = 0;
-extern "C" void gxSetWebFpsOverride(unsigned fps) { s_gxWebFpsOverride = fps; }
-#endif
-
 Real FrameRateLimit::wait(UnsignedInt maxFps)
 {
 	PROFILER_SECTION;
-
-#ifdef __EMSCRIPTEN__
-	if (s_gxWebFpsOverride != 0 && s_gxWebFpsOverride > maxFps)
-	{
-		maxFps = s_gxWebFpsOverride;
-	}
-#endif
 
 	// GeneralsX @bugfix BenderAI 11/05/2026 Validate FPS limit to prevent division by zero and underflow
 	// Skip limiting if maxFps is 0 or extremely high (uncapped mode)

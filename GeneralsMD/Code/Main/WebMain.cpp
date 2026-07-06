@@ -60,8 +60,9 @@ extern "C" void d3d8webgl_set_native_mode(int w, int h);
 // FFmpeg headers into the entry point; the C ABI is stable.
 extern "C" void av_log_set_level(int level);
 
-// FrameRateLimit.cpp: render FPS override from the loader settings.
-extern "C" void gxSetWebFpsOverride(unsigned fps);
+// Loader render-FPS setting, enforced per frame in gxWebPeriodic() through
+// the engine's native render/logic decoupling (FramePacer).
+static int s_gxFpsSetting = 0;
 
 // USER INCLUDES (match SDL3Main.cpp pattern)
 #include "Lib/BaseType.h"
@@ -69,6 +70,7 @@ extern "C" void gxSetWebFpsOverride(unsigned fps);
 #include "Common/CriticalSection.h"
 #include "Common/GlobalData.h"
 #include "Common/GameEngine.h"
+#include "Common/FramePacer.h"
 #include "Common/GameMemory.h"
 #include "Common/Debug.h"
 #include "Common/version.h"
@@ -234,6 +236,19 @@ static void GxBackupUserdataDir(const std::string &dir, const std::string &rel)
 
 extern "C" void gxWebPeriodic(void)
 {
+	// Render-FPS setting: raise the render limit while keeping the current
+	// engine limit as the LOGIC rate (= game speed). Re-applied every frame
+	// because in-game code rewrites the limit (skirmish game-speed slider,
+	// script actions).
+	if (s_gxFpsSetting > 30 && TheFramePacer) {
+		const Int cur = TheFramePacer->getFramesPerSecondLimit();
+		if (cur > 0 && cur < s_gxFpsSetting) {
+			TheFramePacer->setLogicTimeScaleFps(cur);
+			TheFramePacer->enableLogicTimeScale(true);
+			TheFramePacer->setFramesPerSecondLimit(s_gxFpsSetting);
+		}
+	}
+
 	if (!s_gxIdbMode) return;
 	static double s_last = 0.0;
 	const double now = emscripten_get_now();
@@ -436,16 +451,13 @@ int main(int argc, char* argv[])
 		// swscale contexts before FFmpegFile::open() runs, so set it here.
 		av_log_set_level(16);
 
-		// Loader FPS setting (Module.gxFps): survives in-game rewrites of the
-		// engine limit (skirmish game-speed slider etc.).
-		{
-			const int fpsSetting = MAIN_THREAD_EM_ASM_INT({
-				return (typeof Module !== 'undefined' && Module.gxFps) ? (Module.gxFps | 0) : 0;
-			});
-			if (fpsSetting > 30) {
-				gxSetWebFpsOverride((unsigned)fpsSetting);
-				fprintf(stderr, "INFO: render FPS override: %d\n", fpsSetting);
-			}
+		// Loader FPS setting (Module.gxFps): enforced each frame in
+		// gxWebPeriodic() through FramePacer's render/logic decoupling.
+		s_gxFpsSetting = MAIN_THREAD_EM_ASM_INT({
+			return (typeof Module !== 'undefined' && Module.gxFps) ? (Module.gxFps | 0) : 0;
+		});
+		if (s_gxFpsSetting > 30) {
+			fprintf(stderr, "INFO: render FPS setting: %d (logic stays at the game-speed value)\n", s_gxFpsSetting);
 		}
 
 		// Call cross-platform game entry point
