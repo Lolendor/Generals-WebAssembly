@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # GeneralsX Web - assemble the deployable static bundle.
 #
-# Produces web/dist/ - a self-contained directory you can upload to ANY web
-# server or static hosting (nginx, GitHub Pages, shared hosting...):
+# Iterates over all builds in web/gamedata/ (e.g. default_ru), packs each
+# into dist/assets/{build}/, copies the wasm shell once, and writes build.json.
 #
-#   dist/
-#     index.html, loader.js, storage.js, signaling.js, game.js,
-#     coi-serviceworker.js       <- injects COOP/COEP on bare static hosts
-#     ice.json                   <- EDITABLE: STUN/TURN + MQTT signaling brokers
-#     GeneralsXZH.js, GeneralsXZH.wasm
-#     assets/manifest.json, assets/files/...   <- from pack-assets.sh
+# dist/
+#   index.html, loader.js, storage.js, signaling.js, game.js,
+#   coi-serviceworker.js   <- COOP/COEP injector for bare static hosts
+#   ice.json               <- EDITABLE: STUN/TURN + MQTT brokers
+#   GeneralsXZH.js, GeneralsXZH.wasm
+#   build.json             <- {buildId: "xxxx"}
+#   assets/
+#     builds.json           <- ["default_ru", ...]
+#     default_ru/
+#       manifest.json
+#       files/...
 #
-# Usage:
-#   scripts/web/make-dist.sh [wasm-build-dir]   (default build/emscripten/GeneralsMD)
-#
-# Run scripts/web/pack-assets.sh first (or after - assets land in dist/assets).
+# Creates:
+#   scripts/web/pack-assets.sh {build}   (once per build)
 #
 # GeneralsX @build web-port 05/07/2026 - Web port Phase 1
 set -euo pipefail
@@ -25,35 +28,62 @@ DIST="$REPO_ROOT/web/dist"
 
 if [ ! -f "$WASM_DIR/GeneralsXZH.wasm" ]; then
     echo "ERROR: $WASM_DIR/GeneralsXZH.wasm not found - build first:" >&2
-    echo "  EMSCRIPTEN_ROOT=\$(brew --prefix emscripten)/libexec cmake --preset emscripten" >&2
-    echo "  cmake --build build/emscripten --target z_generals" >&2
+    echo "  cmake --preset emscripten && cmake --build build/emscripten --target z_generals" >&2
     exit 1
 fi
 
 mkdir -p "$DIST"
 
+# ── Shell ─────────────────────────────────────────────────────────────────────
 echo "==> Shell"
 cp "$REPO_ROOT"/web/shell/*.js "$REPO_ROOT"/web/shell/index.html "$DIST/"
-# ice.json is operator-editable: never clobber an existing customized copy.
 if [ ! -f "$DIST/ice.json" ]; then
     cp "$REPO_ROOT/web/shell/ice.json" "$DIST/"
 else
     echo "    dist/ice.json exists - keeping your edited version"
 fi
 
+# ── Wasm build ────────────────────────────────────────────────────────────────
 echo "==> Wasm build"
 cp "$WASM_DIR/GeneralsXZH.js" "$WASM_DIR/GeneralsXZH.wasm" "$DIST/"
 BUILD_ID=$(shasum -a 256 "$DIST/GeneralsXZH.wasm" | cut -c1-12)
 printf '{"buildId": "%s"}\n' "$BUILD_ID" > "$DIST/build.json"
 echo "    buildId: $BUILD_ID"
 
-if [ -f "$DIST/assets/manifest.json" ]; then
-    echo "==> Assets already packed ($(du -sh "$DIST/assets" | cut -f1))"
-else
-    echo "==> NOTE: no assets yet - run: scripts/web/pack-assets.sh /path/to/GeneralsZH"
+# ── Discover builds (directories under web/gamedata/) ─────────────────────────
+BUILDS=()
+for d in "$REPO_ROOT/web/gamedata"/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    [ -n "$name" ] || continue
+    BUILDS+=("$name")
+done
+
+if [ ${#BUILDS[@]} -eq 0 ]; then
+    echo "ERROR: no builds found in $REPO_ROOT/web/gamedata/" >&2
+    exit 1
 fi
 
+echo "==> Buildings (${#BUILDS[@]}): ${BUILDS[*]}"
+
+# ── Pack each build ──────────────────────────────────────────────────────────
+for name in "${BUILDS[@]}"; do
+    echo "  -> $name"
+    "$REPO_ROOT/scripts/web/pack-assets.sh" "$name"
+done
+
+# ── Builds index ──────────────────────────────────────────────────────────────
+printf '[\n' > "$DIST/assets/builds.json"
+first=true
+for name in "${BUILDS[@]}"; do
+    $first || printf ',\n' >> "$DIST/assets/builds.json"
+    printf '  "%s"' "$name" >> "$DIST/assets/builds.json"
+    first=false
+done
+printf '\n]\n' >> "$DIST/assets/builds.json"
+
 echo "==> Done: $DIST"
+echo "    Builds: ${BUILDS[*]}"
 echo "    Upload the directory to any HTTPS host, or serve locally:"
 echo "    cd web && go run ./server -dir ./dist            # http://localhost:8080"
 echo "    cd web && go run ./server -dir ./dist -tls-self-signed   # https://<ip>:8080"

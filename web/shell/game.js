@@ -44,8 +44,8 @@ async function gxStartGame() {
       gxStorageMode: window.gxStorageKind === 'idb' ? 1 : 0,
       // Loader settings: render FPS limit (see index.html #gx-settings).
       gxFps: parseInt(localStorage.getItem('gx-fps') || '30', 10),
-      // Loader language setting.
-      gxLang: localStorage.getItem('gx-lang') || 'english',
+      // Selected build name (stored by loader, consumed by WebMain if needed).
+      gxBuildName: localStorage.getItem('gx-build') || 'default_ru',
       print: (t) => console.log('[game]', t),
       printErr: (t) => {
         // Drop known per-frame spam (same filter the iOS port uses in its

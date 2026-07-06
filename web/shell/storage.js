@@ -147,6 +147,20 @@ class OpfsStorage {
     return await f.arrayBuffer();
   }
 
+  async listPaths() {
+    const paths = [];
+    async function walk(dir, prefix) {
+      for await (const [name, handle] of dir) {
+        const full = prefix ? prefix + '/' + name : name;
+        if (handle.kind === 'file') paths.push(full);
+        else await walk(handle, full);
+      }
+    }
+    await walk(this.root, '');
+    // Filter out meta/ and userdata/ for the caller's convenience.
+    return paths.filter(p => !p.startsWith('meta/'));
+  }
+
   async remove(path) {
     try {
       const { dir, name } = await this._dir(gxStoragePath(path), false);
