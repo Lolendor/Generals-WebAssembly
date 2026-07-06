@@ -691,6 +691,17 @@ void RTS3DScene::renderOneObject(RenderInfoClass &rinfo, RenderObjClass *robj, I
 
 				Vector3::Add(temp, sumTint, &temp);
 
+#ifdef __EMSCRIPTEN__
+				// GeneralsX @tweak web-port 06/07/2026 Floor darkening tints at 25% of the
+				// untinted light. The DISABLED tint (-0.5) exceeds the entire night light
+				// budget (ambient .33, diffuse .2..0.3), rendering unpowered buildings as
+				// unreadable coal (and LightEnvironment then rejects the negative lights
+				// entirely). Day maps have headroom and are unaffected.
+				temp.X = max(temp.X, restore.X * 0.25f);
+				temp.Y = max(temp.Y, restore.Y * 0.25f);
+				temp.Z = max(temp.Z, restore.Z * 0.25f);
+#endif
+
 				sceneLights[globalLightIndex]->Set_Diffuse( temp );
 				lightEnv.Add_Light(*sceneLights[globalLightIndex]);
 				sceneLights[globalLightIndex]->Set_Diffuse( restore );
@@ -698,7 +709,17 @@ void RTS3DScene::renderOneObject(RenderInfoClass &rinfo, RenderObjClass *robj, I
 			}
 
 			temp = lightEnv.Get_Equivalent_Ambient();
+#ifdef __EMSCRIPTEN__
+			{
+				Vector3 baseAmbient = temp;
+				Vector3::Add(sumTint, temp, &temp );
+				temp.X = max(temp.X, baseAmbient.X * 0.25f);
+				temp.Y = max(temp.Y, baseAmbient.Y * 0.25f);
+				temp.Z = max(temp.Z, baseAmbient.Z * 0.25f);
+			}
+#else
 			Vector3::Add(sumTint, temp, &temp );
+#endif
 
 			lightEnv.Set_Output_Ambient( temp );
 
@@ -797,6 +818,7 @@ void RTS3DScene::renderOneObject(RenderInfoClass &rinfo, RenderObjClass *robj, I
 
 		lightEnv.Pre_Render_Update(rinfo.Camera.Get_Transform());
 		rinfo.light_environment = &lightEnv;
+
 
 		if (drawInfo)
 		{
@@ -905,6 +927,7 @@ void RTS3DScene::updateFixedLightEnvironments(RenderInfoClass & rinfo)
 	//Generate the default light environment
 	m_defaultLightEnv.Reset(Vector3(0,0,0), Get_Ambient_Light());
 	m_foggedLightEnv.Reset(Vector3(0,0,0), Get_Ambient_Light()*foggedLightFrac);
+
 
 	Vector3 oldDiffuse, oldAmbient;
 	for (Int globalLightIndex = 0; globalLightIndex < m_numGlobalLights; globalLightIndex++)
