@@ -38,6 +38,10 @@
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/Gadget.h"
 #include "W3DDevice/GameLogic/W3DGameLogic.h"
+#ifdef __EMSCRIPTEN__
+// d3d8webgl canvas resize helper, declared for the resize handler body.
+extern "C" void d3d8webgl_resize(int, int);
+#endif
 #include "W3DDevice/GameClient/W3DGameClient.h"
 #include "W3DDevice/Common/W3DModuleFactory.h"
 #include "W3DDevice/Common/W3DThingFactory.h"
@@ -854,8 +858,16 @@ void SDL3GameEngine::handleMouseWheelEvent(const SDL_MouseWheelEvent& event)
  */
 void SDL3GameEngine::handleWindowEvent(const SDL_WindowEvent& event)
 {
-	// TODO: Phase 2 - Handle window resize, notify graphics subsystem
-	// fprintf(stderr, "DEBUG: Window event (type=%d)\n", event.type);
+#ifdef __EMSCRIPTEN__
+	// Forward the resize to the d3d8webgl render pipeline so its
+	// backbuffer and viewport match the canvas (the user's browser
+	// window changed size).
+	if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+		int w = 0, h = 0;
+		SDL_GetWindowSizeInPixels(TheSDL3Window, &w, &h);
+		d3d8webgl_resize(w & ~1, h & ~1);
+	}
+#endif
 }
 
 /**

@@ -405,6 +405,18 @@ int main(int argc, char* argv[])
 			ApplicationHWnd = (HWND)TheSDL3Window;
 			fprintf(stderr, "INFO: SDL3 window created successfully\n");
 
+#ifdef __EMSCRIPTEN__
+			// On Emscripten the canvas must be sized to the actual viewport
+			// before any SDL size query or resolution injection - otherwise
+			// the canvas defaults to 1024x768 (the SDL_CreateWindow size)
+			// and is centre-fitted into the viewport, producing black bars
+			// until the user triggers a resize.
+			int vpW = MAIN_THREAD_EM_ASM_INT({ return window.innerWidth; });
+			int vpH = MAIN_THREAD_EM_ASM_INT({ return window.innerHeight; });
+			SDL_SetWindowSize(TheSDL3Window, vpW, vpH);
+			// d3d8webgl_set_native_mode is called from the resolution block below.
+#endif
+
 			// Match the engine's internal resolution to the SDL window/canvas
 			// (same pattern as the iOS port): injected as -xres/-yres argv so
 			// the normal command-line path applies them unless the user passed
@@ -450,6 +462,23 @@ int main(int argc, char* argv[])
 		// FFmpeg: errors only (16 = AV_LOG_ERROR). Some video paths create
 		// swscale contexts before FFmpegFile::open() runs, so set it here.
 		av_log_set_level(16);
+
+		// Loader language setting (Module.gxLang -> CNC_ZH_LANGUAGE env var).
+		// GetStringFromRegistry() checks this env var before auto-detection.
+		// Note: all language BIGs store their CSF under Data\English\ (they
+		// override the English path), so NEVER use %s in g_csfFile.
+		{
+			const int langIdx = MAIN_THREAD_EM_ASM_INT({
+				return (typeof Module !== 'undefined' && Module.gxLang === 'russian') ? 1 : 0;
+			});
+			setenv("CNC_ZH_LANGUAGE", langIdx ? "russian" : "english", 1);
+			fprintf(stderr, "INFO: language set to %s\n", langIdx ? "russian" : "english");
+			// All language packs put their CSF at Data\English\generals.csf
+			// in the BIG (they override the English path). The %s in the
+			// default path would look under data/<lang>/ which doesn't exist
+			// for any non-English language. Force the fixed path.
+			g_csfFile = "data/english/generals.csf";
+		}
 
 		// Loader FPS setting (Module.gxFps): enforced each frame in
 		// gxWebPeriodic() through FramePacer's render/logic decoupling.

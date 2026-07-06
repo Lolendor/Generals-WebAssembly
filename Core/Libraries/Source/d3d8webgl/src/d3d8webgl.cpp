@@ -1729,6 +1729,16 @@ extern "C" void d3d8webgl_set_native_mode(int w, int h)
 	}
 }
 
+// Forward a canvas/window resize to the WebGL pipeline so the backbuffer
+// and viewport match the browser viewport (called from SDL3GameEngine's
+// SDL_EVENT_WINDOW_RESIZED handler).
+extern "C" void d3d8webgl_resize(int w, int h)
+{
+	if (w > 0 && h > 0) {
+		WebGLPipeline::get()->resize(w, h);
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Entry point (statically linked; called by DX8Wrapper::Init on Emscripten)
 // ---------------------------------------------------------------------------

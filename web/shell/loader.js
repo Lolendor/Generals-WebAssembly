@@ -102,6 +102,27 @@ async function gxSyncAssets(storage) {
   if (!resp.ok) throw new Error('assets/manifest.json недоступен: HTTP ' + resp.status);
   const manifest = await resp.json();
 
+  const lang = localStorage.getItem('gx-lang') || 'english';
+  const isEnglish = lang === 'english' || lang === 'English';
+  // Language-specific BIGs: filter out the set that does NOT match the
+  // selected language, so the game's BIG loader never sees conflicting
+  // copies of Data\English\generals.csf or language-specific strings.
+  // English set:
+  //   GameDataGenerals/English.big, GameDataGenerals/AudioEnglish.big,
+  //   GameDataGenerals/SpeechEnglish.big, EnglishZH.big,
+  //   AudioEnglishZH.big, SpeechEnglishZH.big, W3DEnglishZH.big
+  // Russian set:
+  //   GameDataGenerals/0!Russian.big, GameDataGenerals/00Russian.big,
+  //   GameDataGenerals/Audio.big, GameDataGenerals/Speech.big,
+  //   00RussianZH.big, Data/Movies/Russian_VS_small.bik
+  const skipLang = isEnglish
+    ? ['00RussianZH.big', 'GameDataGenerals/0!Russian.big',
+       'GameDataGenerals/00Russian.big', 'GameDataGenerals/Audio.big',
+       'GameDataGenerals/Speech.big', 'Data/Movies/Russian_VS_small.bik']
+    : ['AudioEnglishZH.big', 'EnglishZH.big', 'SpeechEnglishZH.big',
+       'W3DEnglishZH.big', 'GameDataGenerals/AudioEnglish.big',
+       'GameDataGenerals/English.big', 'GameDataGenerals/SpeechEnglish.big'];
+
   const installed = (await storage.readMeta('installed-manifest')) || { files: {} };
   const installedByPath = installed.files || {};
 
@@ -109,6 +130,10 @@ async function gxSyncAssets(storage) {
   const toDownload = [];
   let totalBytes = 0;
   for (const f of manifest.files) {
+    if (skipLang.includes(f.path)) {
+      console.log('[loader] пропуск (' + lang + '): ' + f.path);
+      continue;
+    }
     const have = installedByPath[f.path];
     if (have && have.sha256 === f.sha256) {
       const size = await storage.fileSize(f.path);
@@ -173,6 +198,27 @@ async function gxSyncAssets(storage) {
   installed.files = installedByPath;
   installed.version = manifest.version;
   await storage.writeMeta('installed-manifest', installed);
+  // Clean up stale language files from a previous language selection.
+  // After a language switch the diff loop skips the wrong-language files,
+  // but they still occupy space and the game's BIG scanner would load them.
+  const cleanLang = isEnglish
+    ? ['00RussianZH.big', 'GameDataGenerals/0!Russian.big',
+       'GameDataGenerals/00Russian.big', 'GameDataGenerals/Audio.big',
+       'GameDataGenerals/Speech.big', 'Data/Movies/Russian_VS_small.bik']
+    : ['AudioEnglishZH.big', 'EnglishZH.big', 'SpeechEnglishZH.big',
+       'W3DEnglishZH.big', 'GameDataGenerals/AudioEnglish.big',
+       'GameDataGenerals/English.big', 'GameDataGenerals/SpeechEnglish.big'];
+  for (const path of cleanLang) {
+    try {
+      const have = await storage.has(path);
+      if (have) {
+        await storage.remove(path);
+        console.log('[loader] очищен устаревший файл: ' + path);
+      }
+    } catch (e) {
+      console.log('[loader] не удалось очистить ' + path + ': ' + e);
+    }
+  }
   console.log('[loader] загрузка завершена');
   return manifest;
 }
@@ -248,6 +294,10 @@ async function gxBoot() {
     fpsSel.value = localStorage.getItem('gx-fps') || '30';
     if (![...fpsSel.options].some(o => o.value === fpsSel.value)) fpsSel.value = '30';
     fpsSel.addEventListener('change', () => localStorage.setItem('gx-fps', fpsSel.value));
+    const langSel = document.getElementById('gx-lang');
+    langSel.value = localStorage.getItem('gx-lang') || 'english';
+    if (![...langSel.options].some(o => o.value === langSel.value)) langSel.value = 'english';
+    langSel.addEventListener('change', () => localStorage.setItem('gx-lang', langSel.value));
     settingsBtn.style.display = 'inline-block';
     settingsBtn.addEventListener('click', () => { settingsBox.hidden = !settingsBox.hidden; });
 
