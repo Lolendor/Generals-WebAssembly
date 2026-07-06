@@ -42,6 +42,23 @@
     border: none; border-radius: 6px; text-transform: uppercase; font-weight: 700;
   }
   #gx-play:hover { filter: brightness(1.1); }
+  #gx-settings-btn {
+    display: none; margin-top: 12px; padding: 8px 22px;
+    font-size: 13px; letter-spacing: 1px; cursor: pointer;
+    color: #d8dee6; background: #1d2733; border: 1px solid #2c3a4a;
+    border-radius: 6px;
+  }
+  #gx-settings-btn:hover { background: #253242; }
+  #gx-settings {
+    margin-top: 14px; padding: 14px 20px; font-size: 14px;
+    background: #131b24; border: 1px solid #2c3a4a; border-radius: 6px;
+    text-align: left;
+  }
+  #gx-settings select {
+    margin-left: 8px; padding: 4px 8px; font-size: 14px;
+    color: #d8dee6; background: #1d2733; border: 1px solid #2c3a4a; border-radius: 4px;
+  }
+  #gx-settings-note { margin-top: 8px; font-size: 11px; opacity: .5; }
   #gx-error {
     display: none; margin-top: 24px; max-width: min(640px, 85vw);
     padding: 14px 18px; border: 1px solid #7c3a3a; border-radius: 6px;
@@ -62,6 +79,19 @@
   </div>
   <div id="gx-detail">Инициализация…</div>
   <button id="gx-play">Играть</button>
+  <button id="gx-settings-btn" type="button">Настройки</button>
+  <div id="gx-settings" hidden>
+    <label>Лимит FPS:
+      <select id="gx-fps">
+        <option value="30">30 (оригинал)</option>
+        <option value="60">60</option>
+        <option value="90">90</option>
+        <option value="120">120</option>
+        <option value="144">144</option>
+      </select>
+    </label>
+    <div id="gx-settings-note">Сохраняется в браузере; применяется при запуске игры.</div>
+  </div>
   <div id="gx-error"></div>
   <div id="gx-storage-kind"></div>
 </div>

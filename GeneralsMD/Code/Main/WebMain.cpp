@@ -50,6 +50,7 @@
 #include <string>
 #include <unistd.h>   // _exit(), chdir()
 #include <sys/stat.h>
+#include <dirent.h>   // userdata write-back walk
 
 // d3d8webgl: native display mode published before device creation.
 extern "C" void d3d8webgl_set_native_mode(int w, int h);
@@ -58,6 +59,9 @@ extern "C" void d3d8webgl_set_native_mode(int w, int h);
 // SIMD paths - wasm has none by definition. Declared here to avoid pulling
 // FFmpeg headers into the entry point; the C ABI is stable.
 extern "C" void av_log_set_level(int level);
+
+// FrameRateLimit.cpp: render FPS override from the loader settings.
+extern "C" void gxSetWebFpsOverride(unsigned fps);
 
 // USER INCLUDES (match SDL3Main.cpp pattern)
 #include "Lib/BaseType.h"
@@ -145,9 +149,11 @@ static bool PopulateFromIdb()
 		const size_t size = (size_t)sizeD;
 
 		// Create intermediate directories under /opfs/GameData. Paths prefixed
-		// with GameDataGenerals/ (the optional base-game install) live as an
-		// /opfs sibling instead - see gxStoragePath() in storage.js.
-		std::string full = (strncmp(pathBuf, "GameDataGenerals/", 17) == 0)
+		// with GameDataGenerals/ (the optional base-game install) or userdata/
+		// (write-back saves restored from IndexedDB) live as /opfs siblings
+		// instead - see gxStoragePath()/gxIdbPutUserFile in the JS shell.
+		std::string full = (strncmp(pathBuf, "GameDataGenerals/", 17) == 0 ||
+		                    strncmp(pathBuf, "userdata/", 9) == 0)
 			? std::string("/opfs/") + pathBuf
 			: std::string("/opfs/GameData/") + pathBuf;
 		for (size_t p = strlen("/opfs/"); p < full.size(); p++) {
@@ -185,6 +191,55 @@ static bool PopulateFromIdb()
 	MAIN_THREAD_EM_ASM({ window.gxFiles = null; });
 	fprintf(stderr, "INFO: IndexedDB population complete\n");
 	return true;
+}
+
+/**
+ * gxWebPeriodic
+ *
+ * Called once per frame from the GameEngine web tick. In IndexedDB mode the
+ * js-file backend is session-local, so every ~20s we push the userdata tree
+ * (saves, Options.ini, replays) back to IndexedDB via window.gxIdbPutUserFile;
+ * the loader restores it into /opfs/userdata on the next boot.
+ */
+static bool s_gxIdbMode = false;
+
+static void GxBackupUserdataDir(const std::string &dir, const std::string &rel)
+{
+	DIR *d = opendir(dir.c_str());
+	if (!d) return;
+	while (struct dirent *e = readdir(d)) {
+		if (e->d_name[0] == '.') continue;
+		const std::string full = dir + "/" + e->d_name;
+		const std::string relPath = rel.empty() ? e->d_name : rel + "/" + e->d_name;
+		struct stat st;
+		if (stat(full.c_str(), &st) != 0) continue;
+		if (S_ISDIR(st.st_mode)) {
+			GxBackupUserdataDir(full, relPath);
+			continue;
+		}
+		FILE *fp = fopen(full.c_str(), "rb");
+		if (!fp) continue;
+		std::string bytes((size_t)st.st_size, '\0');
+		const size_t got = fread(&bytes[0], 1, bytes.size(), fp);
+		fclose(fp);
+		if (got != bytes.size()) continue;
+		MAIN_THREAD_EM_ASM({
+			if (window.gxIdbPutUserFile) {
+				window.gxIdbPutUserFile(UTF8ToString($0), HEAPU8.slice($1, $1 + $2));
+			}
+		}, relPath.c_str(), bytes.data(), (int)bytes.size());
+	}
+	closedir(d);
+}
+
+extern "C" void gxWebPeriodic(void)
+{
+	if (!s_gxIdbMode) return;
+	static double s_last = 0.0;
+	const double now = emscripten_get_now();
+	if (now - s_last < 20000.0) return; // every ~20s
+	s_last = now;
+	GxBackupUserdataDir("/opfs/userdata", "");
 }
 
 /**
@@ -231,6 +286,7 @@ static bool MountGameStorage()
 		return false;
 	}
 
+	s_gxIdbMode = (mode != 0);
 	if (mode != 0) {
 		mkdir("/opfs/GameData", 0777);
 		if (!PopulateFromIdb()) {
@@ -379,6 +435,18 @@ int main(int argc, char* argv[])
 		// FFmpeg: errors only (16 = AV_LOG_ERROR). Some video paths create
 		// swscale contexts before FFmpegFile::open() runs, so set it here.
 		av_log_set_level(16);
+
+		// Loader FPS setting (Module.gxFps): survives in-game rewrites of the
+		// engine limit (skirmish game-speed slider etc.).
+		{
+			const int fpsSetting = MAIN_THREAD_EM_ASM_INT({
+				return (typeof Module !== 'undefined' && Module.gxFps) ? (Module.gxFps | 0) : 0;
+			});
+			if (fpsSetting > 30) {
+				gxSetWebFpsOverride((unsigned)fpsSetting);
+				fprintf(stderr, "INFO: render FPS override: %d\n", fpsSetting);
+			}
+		}
 
 		// Call cross-platform game entry point
 		exitcode = GameMain();

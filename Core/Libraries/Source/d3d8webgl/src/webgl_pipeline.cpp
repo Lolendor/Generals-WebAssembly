@@ -325,11 +325,21 @@ static void getStageKey(WebGLDevice *dev, int stage, StageKey *k)
 	const DWORD tciRaw = dev->getStageState(stage, D3DTSS_TEXCOORDINDEX);
 	k->texgen = 0;
 	if (tciRaw & 0xFFFF0000u) {
-		if ((tciRaw & 0xFFFF0000u) == D3DTSS_TCI_CAMERASPACEPOSITION) {
+		switch (tciRaw & 0xFFFF0000u) {
+		case D3DTSS_TCI_CAMERASPACEPOSITION:
 			// Terrain macro/cloud layers: uv = texture matrix * view-space pos.
 			k->texgen = 1;
-		} else {
+			break;
+		case D3DTSS_TCI_CAMERASPACEREFLECTIONVECTOR:
+			// Environment maps: uv = texture matrix * reflect(eye, view normal).
+			k->texgen = 2;
+			break;
+		case D3DTSS_TCI_CAMERASPACENORMAL:
+			k->texgen = 3;
+			break;
+		default:
 			WARN_ONCE(s_texgen, "texgen TEXCOORDINDEX flags 0x%x not implemented (stage %d)", (unsigned)tciRaw, stage);
+			break;
 		}
 	}
 	k->tci = tciRaw & 0x1;
@@ -620,6 +630,15 @@ WebGLPipeline::ProgramInfo *WebGLPipeline::getProgram(WebGLDevice *dev, unsigned
 			// D3DTSS_TCI_CAMERASPACEPOSITION: coordinates are the view-space
 			// position run through the stage texture matrix.
 			snprintf(b, sizeof(b), "  vUV%d = (uTexMat%d * vec4(vpos.xyz, 1.0)).xy;\n", s, s);
+		} else if (st[s].texgen == 2 && !l.xyzrhw && l.hasNormal) {
+			// D3DTSS_TCI_CAMERASPACEREFLECTIONVECTOR: environment mapping.
+			snprintf(b, sizeof(b),
+				"  vUV%d = (uTexMat%d * vec4(reflect(normalize(vpos.xyz), "
+				"normalize(mat3(uView) * mat3(uWorld) * aNormal)), 1.0)).xy;\n", s, s);
+		} else if (st[s].texgen == 3 && !l.xyzrhw && l.hasNormal) {
+			// D3DTSS_TCI_CAMERASPACENORMAL.
+			snprintf(b, sizeof(b),
+				"  vUV%d = (uTexMat%d * vec4(normalize(mat3(uView) * mat3(uWorld) * aNormal), 1.0)).xy;\n", s, s);
 		} else if (texIn == 0) {
 			snprintf(b, sizeof(b), "  vUV%d = vec2(0.0);\n", s);
 		} else if (st[s].xform) {

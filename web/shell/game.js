@@ -11,8 +11,16 @@ function gxGameArguments() {
   // Pass engine flags via URL: ?args=-headless+-noshellmap etc.
   const p = new URLSearchParams(location.search);
   const raw = p.get('args');
-  if (!raw) return [];
-  return raw.split(' ').filter(Boolean);
+  const args = raw ? raw.split(' ').filter(Boolean) : [];
+  // Loader settings (index.html #gx-settings): FPS limit -> engine -fps.
+  // An explicit -fps in ?args= wins.
+  if (!args.includes('-fps')) {
+    const fps = parseInt(localStorage.getItem('gx-fps') || '30', 10);
+    if (fps > 0 && fps !== 30) {
+      args.push('-fps', String(fps));
+    }
+  }
+  return args;
 }
 
 async function gxStartGame() {
@@ -34,6 +42,8 @@ async function gxStartGame() {
       // 0 = OPFS (WASMFS OPFS backend), 1 = IndexedDB (js-file backend +
       // population from window.gxFiles). Read by WebMain.cpp.
       gxStorageMode: window.gxStorageKind === 'idb' ? 1 : 0,
+      // Loader settings: render FPS limit (see index.html #gx-settings).
+      gxFps: parseInt(localStorage.getItem('gx-fps') || '30', 10),
       print: (t) => console.log('[game]', t),
       printErr: (t) => {
         // Drop known per-frame spam (same filter the iOS port uses in its

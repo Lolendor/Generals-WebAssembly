@@ -43,9 +43,24 @@ FrameRateLimit::FrameRateLimit()
 #endif
 }
 
+#ifdef __EMSCRIPTEN__
+// GeneralsX @build web-port 06/07/2026 Loader FPS setting. Applied here (not
+// via -fps) because in-game code rewrites m_framesPerSecondLimit - e.g. the
+// skirmish game-speed slider clamps it back to 15..61 on match start.
+static UnsignedInt s_gxWebFpsOverride = 0;
+extern "C" void gxSetWebFpsOverride(unsigned fps) { s_gxWebFpsOverride = fps; }
+#endif
+
 Real FrameRateLimit::wait(UnsignedInt maxFps)
 {
 	PROFILER_SECTION;
+
+#ifdef __EMSCRIPTEN__
+	if (s_gxWebFpsOverride != 0 && s_gxWebFpsOverride > maxFps)
+	{
+		maxFps = s_gxWebFpsOverride;
+	}
+#endif
 
 	// GeneralsX @bugfix BenderAI 11/05/2026 Validate FPS limit to prevent division by zero and underflow
 	// Skip limiting if maxFps is 0 or extremely high (uncapped mode)
@@ -101,6 +116,25 @@ Real FrameRateLimit::wait(UnsignedInt maxFps)
 	const double targetSeconds = 1.0 / maxFps;
 	const double sleepSeconds = targetSeconds - elapsedSeconds - 0.002; // leave ~2ms for spin wait
 
+#ifdef __EMSCRIPTEN__
+	// GeneralsX @build web-port 06/07/2026 No spin on the game pthread: a busy
+	// wait burns the worker core and starves the proxied-to-main-thread work
+	// (OpenAL streaming) - audible as crackling. Millisecond sleep precision
+	// is plenty; rAF paces presentation anyway.
+	const double fullSleep = targetSeconds - elapsedSeconds;
+	if (fullSleep > 0.0)
+	{
+		struct timespec sleepTime;
+		sleepTime.tv_sec = static_cast<time_t>(fullSleep);
+		sleepTime.tv_nsec = static_cast<long>((fullSleep - sleepTime.tv_sec) * 1000000000);
+		nanosleep(&sleepTime, nullptr);
+	}
+	clock_gettime(CLOCK_MONOTONIC, &tick);
+	tickValue = static_cast<Int64>(tick.tv_sec) * 1000000000 + tick.tv_nsec;
+	elapsedSeconds = static_cast<double>(tickValue - m_start) / static_cast<double>(m_freq);
+	m_start = tickValue;
+	return static_cast<Real>(elapsedSeconds);
+#else
 	if (sleepSeconds > 0.0)
 	{
 		// Non busy wait with nanosleep
@@ -121,6 +155,7 @@ Real FrameRateLimit::wait(UnsignedInt maxFps)
 
 	m_start = tickValue;
 	return static_cast<Real>(elapsedSeconds);
+#endif // __EMSCRIPTEN__
 #endif
 }
 

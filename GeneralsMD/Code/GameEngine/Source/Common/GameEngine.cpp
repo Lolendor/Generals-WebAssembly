@@ -1003,6 +1003,7 @@ extern HWND ApplicationHWnd;
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+extern "C" void gxWebPeriodic(void); // WebMain.cpp: IDB userdata write-back
 /** -----------------------------------------------------------------------------------------------
  * Web main loop. OffscreenCanvas frames only reach the screen when this
  * pthread yields to its event loop, so a blocking while() would render a
@@ -1052,6 +1053,9 @@ void GameEngine::execute()
 		// Native pacing preserved: FramePacer sleeps inside the tick (futex
 		// wait on this pthread), rAF presents whenever the tick returns.
 		TheFramePacer->update();
+
+		// Web housekeeping (IndexedDB userdata write-back; see WebMain.cpp).
+		gxWebPeriodic();
 	};
 	// fps=0 -> requestAnimationFrame; no infinite-loop simulation (the
 	// "unwind" trick would be swallowed by the catch(...) in WebMain).

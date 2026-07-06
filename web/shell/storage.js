@@ -252,6 +252,11 @@ class IdbStorage {
     await this._req(this._tx(GX_DB_STORE, 'readwrite').delete(path));
   }
 
+  // Direct blob write (userdata write-back path).
+  async writeBlob(path, blob) {
+    await this._req(this._tx(GX_DB_STORE, 'readwrite').put(blob, path));
+  }
+
   async listPaths() {
     return await this._req(this._tx(GX_DB_STORE, 'readonly').getAllKeys());
   }

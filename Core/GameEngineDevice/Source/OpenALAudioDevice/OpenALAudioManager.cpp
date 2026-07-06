@@ -2230,13 +2230,16 @@ void OpenALAudioManager::adjustVolumeOfPlayingAudio(AsciiString eventName, Real 
 	std::list<PlayingAudio*>::iterator it;
 
 	PlayingAudio* playing = NULL;
+	// GeneralsX @bugfix web-port 06/07/2026 Scale by the category volume like the
+	// initial-play path does; the raw event volume made adjusted sounds jump
+	// ABOVE the user's option-menu volume limits.
 	for (it = m_playingSounds.begin(); it != m_playingSounds.end(); ++it) {
 		playing = *it;
 		if (playing && playing->m_audioEventRTS && playing->m_audioEventRTS->getEventName() == eventName) {
 			// Adjust it
 			playing->m_audioEventRTS->setVolume(newVolume);
 			Real desiredVolume = playing->m_audioEventRTS->getVolume() * playing->m_audioEventRTS->getVolumeShift();
-			alSourcef(playing->m_source, AL_GAIN, desiredVolume);
+			alSourcef(playing->m_source, AL_GAIN, m_soundVolume * desiredVolume);
 		}
 	}
 
@@ -2246,7 +2249,7 @@ void OpenALAudioManager::adjustVolumeOfPlayingAudio(AsciiString eventName, Real 
 			// Adjust it
 			playing->m_audioEventRTS->setVolume(newVolume);
 			Real desiredVolume = playing->m_audioEventRTS->getVolume() * playing->m_audioEventRTS->getVolumeShift();
-			alSourcef(playing->m_source, AL_GAIN, desiredVolume);
+			alSourcef(playing->m_source, AL_GAIN, m_sound3DVolume * desiredVolume);
 		}
 	}
 
@@ -2256,7 +2259,12 @@ void OpenALAudioManager::adjustVolumeOfPlayingAudio(AsciiString eventName, Real 
 			// Adjust it
 			playing->m_audioEventRTS->setVolume(newVolume);
 			Real desiredVolume = playing->m_audioEventRTS->getVolume() * playing->m_audioEventRTS->getVolumeShift();
-			alSourcef(playing->m_source, AL_GAIN, desiredVolume);
+			const Real categoryVolume =
+				(playing->m_audioEventRTS->getAudioEventInfo() &&
+				 playing->m_audioEventRTS->getAudioEventInfo()->m_soundType == AT_Music)
+					? m_musicVolume : m_speechVolume;
+			alSourcef(playing->m_stream ? playing->m_stream->getSource() : playing->m_source,
+			          AL_GAIN, categoryVolume * desiredVolume);
 		}
 	}
 }

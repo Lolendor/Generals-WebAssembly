@@ -192,7 +192,25 @@ async function gxMaterializeForIdb(storage, manifest) {
       gxUI.progress(done, total, 'Подготовка файлов: ' + done + ' / ' + total);
     }
   }
+  // Saved games / options written back by earlier sessions (see
+  // window.gxIdbPutUserFile below) live under 'userdata/' keys.
+  try {
+    const extra = (await storage.listPaths()).filter((k) => typeof k === 'string' && k.startsWith('userdata/'));
+    for (const k of extra) {
+      files.push({ path: k, data: await storage.readBytes(k) });
+    }
+    if (extra.length) console.log('[loader] восстановлено файлов пользователя из IndexedDB:', extra.length);
+  } catch (e) {
+    console.warn('[loader] не удалось восстановить userdata из IndexedDB:', e);
+  }
   window.gxFiles = files;
+
+  // Write-back sink: WebMain periodically pushes save files here (IDB mode
+  // has no OPFS, so persistence goes through IndexedDB).
+  window.gxIdbPutUserFile = (path, bytes) => {
+    storage.writeBlob('userdata/' + path, new Blob([bytes])).catch((e) =>
+      console.warn('[loader] userdata write-back failed:', path, e));
+  };
 }
 
 async function gxBoot() {
@@ -222,8 +240,21 @@ async function gxBoot() {
     const btn = document.getElementById('gx-play');
     btn.style.display = 'inline-block';
     document.getElementById('gx-progress-wrap').style.display = 'none';
+
+    // Pre-launch settings (persisted in localStorage, consumed by game.js).
+    const settingsBtn = document.getElementById('gx-settings-btn');
+    const settingsBox = document.getElementById('gx-settings');
+    const fpsSel = document.getElementById('gx-fps');
+    fpsSel.value = localStorage.getItem('gx-fps') || '30';
+    if (![...fpsSel.options].some(o => o.value === fpsSel.value)) fpsSel.value = '30';
+    fpsSel.addEventListener('change', () => localStorage.setItem('gx-fps', fpsSel.value));
+    settingsBtn.style.display = 'inline-block';
+    settingsBtn.addEventListener('click', () => { settingsBox.hidden = !settingsBox.hidden; });
+
     await new Promise((resolve) => btn.addEventListener('click', resolve, { once: true }));
     btn.style.display = 'none';
+    settingsBtn.style.display = 'none';
+    settingsBox.hidden = true;
 
     gxUI.status('Запуск движка…');
     await gxStartGame(); // game.js
