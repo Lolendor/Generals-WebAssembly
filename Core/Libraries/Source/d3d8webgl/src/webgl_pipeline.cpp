@@ -231,7 +231,7 @@ struct StageKey {
 };
 
 static void getStageKey(WebGLDevice *dev, int stage, StageKey *k);
-static const char *combinerArg(unsigned arg, const char *texExpr, int *usesTex);
+static std::string combinerArg(unsigned arg, const char *texExpr, int *usesTex);
 static std::string combinerOp(unsigned op, const std::string &a1, const std::string &a2,
                               const char *texAlphaExpr);
 
@@ -313,12 +313,15 @@ void WebGLPipeline::resize(int w, int h)
 
 static void getStageKey(WebGLDevice *dev, int stage, StageKey *k)
 {
+	// Keep the FULL argument values: the low nibble selects the source and
+	// bits 0x10/0x20 are the COMPLEMENT/ALPHAREPLICATE modifiers (the road
+	// noise pass uses DIFFUSE|ALPHAREPLICATE to synthesize white).
 	k->colorOp = dev->getStageState(stage, D3DTSS_COLOROP);
-	k->colorArg1 = dev->getStageState(stage, D3DTSS_COLORARG1) & 0x7;
-	k->colorArg2 = dev->getStageState(stage, D3DTSS_COLORARG2) & 0x7;
+	k->colorArg1 = dev->getStageState(stage, D3DTSS_COLORARG1) & 0x3F;
+	k->colorArg2 = dev->getStageState(stage, D3DTSS_COLORARG2) & 0x3F;
 	k->alphaOp = dev->getStageState(stage, D3DTSS_ALPHAOP);
-	k->alphaArg1 = dev->getStageState(stage, D3DTSS_ALPHAARG1) & 0x7;
-	k->alphaArg2 = dev->getStageState(stage, D3DTSS_ALPHAARG2) & 0x7;
+	k->alphaArg1 = dev->getStageState(stage, D3DTSS_ALPHAARG1) & 0x3F;
+	k->alphaArg2 = dev->getStageState(stage, D3DTSS_ALPHAARG2) & 0x3F;
 	const DWORD tciRaw = dev->getStageState(stage, D3DTSS_TEXCOORDINDEX);
 	k->texgen = 0;
 	if (tciRaw & 0xFFFF0000u) {
@@ -345,11 +348,13 @@ uint64_t WebGLPipeline::computeProgramKey(WebGLDevice *dev, unsigned fvf) const
 	FVFLayout l;
 	parseFVF(fvf, &l);
 
-	uint64_t key = 0;
-	int bit = 0;
-	auto put = [&](uint64_t v, int bits) {
-		key |= (v & ((1ull << bits) - 1)) << bit;
-		bit += bits;
+	// FNV-1a over the full state values: argument MODIFIER bits (COMPLEMENT/
+	// ALPHAREPLICATE) must differentiate programs and no longer fit a packed
+	// 64-bit layout.
+	uint64_t key = 0xcbf29ce484222325ull;
+	auto put = [&](uint64_t v, int /*bits*/) {
+		key ^= v + 0x9E37;
+		key *= 0x100000001b3ull;
 	};
 
 	put(l.xyzrhw ? 1 : 0, 1);
@@ -394,30 +399,36 @@ uint64_t WebGLPipeline::computeProgramKey(WebGLDevice *dev, unsigned fvf) const
 			}
 		}
 		put(sk.colorOp, 5);
-		put(sk.colorArg1, 3);
-		put(sk.colorArg2, 3);
+		put(sk.colorArg1, 6);
+		put(sk.colorArg2, 6);
 		put(sk.alphaOp, 5);
-		put(sk.alphaArg1, 3);
-		put(sk.alphaArg2, 3);
+		put(sk.alphaArg1, 6);
+		put(sk.alphaArg2, 6);
 		put(sk.tci, 1);
 		put(sk.texgen, 1);
 		put(sk.xform ? 1 : 0, 1);
 	}
-	// XOR keeps the mapping bijective now that the packed bits fill all 64.
-	return key ^ 0x9E3779B97F4A7C15ull;
+	return key;
 }
 
-// arg index (masked 0x7): 0=DIFFUSE(via current at st0) 1=CURRENT 2=TEXTURE 3=TFACTOR 4=SPECULAR
-static const char *combinerArg(unsigned arg, const char *texExpr, int *usesTex)
+// Selector (arg & 0xF): 0=DIFFUSE 1=CURRENT 2=TEXTURE 3=TFACTOR 4=SPECULAR.
+// Modifiers: D3DTA_COMPLEMENT (0x10) = 1-x, D3DTA_ALPHAREPLICATE (0x20) = x.aaaa
+// (the road noise pass relies on DIFFUSE|ALPHAREPLICATE to build white).
+static std::string combinerArg(unsigned arg, const char *texExpr, int *usesTex)
 {
-	switch (arg) {
-	case 0: return "vCol";
-	case 1: return "cur";
-	case 2: *usesTex = 1; return texExpr;
-	case 3: return "uTFactor";
-	case 4: return "vSpec";
-	default: return "vCol";
+	const char *base;
+	switch (arg & 0xF) {
+	case 0: base = "vCol"; break;
+	case 1: base = "cur"; break;
+	case 2: *usesTex = 1; base = texExpr; break;
+	case 3: base = "uTFactor"; break;
+	case 4: base = "vSpec"; break;
+	default: base = "vCol"; break;
 	}
+	std::string e = base;
+	if (arg & 0x20) e = "vec4(" + e + ".a)";          // ALPHAREPLICATE first
+	if (arg & 0x10) e = "(vec4(1.0) - " + e + ")";    // then COMPLEMENT
+	return e;
 }
 
 static std::string combinerOp(unsigned op, const std::string &a1, const std::string &a2,
