@@ -96,17 +96,14 @@ function gxAssetUrl(f) {
   return 'assets/files/' + encoded + '?v=' + f.sha256.slice(0, 12);
 }
 
-async function gxSyncAssets(storage) {
+async function gxSyncAssets(storage, lang) {
   gxUI.status('Получаю список файлов…');
   const resp = await fetch('assets/manifest.json', { cache: 'no-cache' });
   if (!resp.ok) throw new Error('assets/manifest.json недоступен: HTTP ' + resp.status);
   const manifest = await resp.json();
 
-  const lang = localStorage.getItem('gx-lang') || 'english';
-  const isEnglish = lang === 'english' || lang === 'English';
-  // Language-specific BIGs: filter out the set that does NOT match the
-  // selected language, so the game's BIG loader never sees conflicting
-  // copies of Data\English\generals.csf or language-specific strings.
+  const isEnglish = lang !== 'russian';
+  // Language-specific BIGs: allowed set for this language.
   // English set:
   //   GameDataGenerals/English.big, GameDataGenerals/AudioEnglish.big,
   //   GameDataGenerals/SpeechEnglish.big, EnglishZH.big,
@@ -115,123 +112,117 @@ async function gxSyncAssets(storage) {
   //   GameDataGenerals/0!Russian.big, GameDataGenerals/00Russian.big,
   //   GameDataGenerals/Audio.big, GameDataGenerals/Speech.big,
   //   00RussianZH.big, Data/Movies/Russian_VS_small.bik
-  const skipLang = isEnglish
+  const skipPaths = isEnglish
     ? ['00RussianZH.big', 'GameDataGenerals/0!Russian.big',
        'GameDataGenerals/00Russian.big', 'GameDataGenerals/Audio.big',
        'GameDataGenerals/Speech.big', 'Data/Movies/Russian_VS_small.bik']
     : ['AudioEnglishZH.big', 'EnglishZH.big', 'SpeechEnglishZH.big',
        'W3DEnglishZH.big', 'GameDataGenerals/AudioEnglish.big',
        'GameDataGenerals/English.big', 'GameDataGenerals/SpeechEnglish.big'];
+  const skipSet = new Set(skipPaths);
+  // Build a Set of allowed paths (manifest minus language-specific).
+  const allowed = new Set(manifest.files.filter(f => !skipSet.has(f.path)).map(f => f.path));
 
+  // Step 1: delete stale language files from a previous language selection.
+  // These are specific known paths — no need to walk the full storage tree.
+  const stale = isEnglish
+    ? ['00RussianZH.big', 'GameDataGenerals/0!Russian.big',
+       'GameDataGenerals/00Russian.big', 'GameDataGenerals/Audio.big',
+       'GameDataGenerals/Speech.big', 'Data/Movies/Russian_VS_small.bik']
+    : ['AudioEnglishZH.big', 'EnglishZH.big', 'SpeechEnglishZH.big',
+       'W3DEnglishZH.big', 'GameDataGenerals/AudioEnglish.big',
+       'GameDataGenerals/English.big', 'GameDataGenerals/SpeechEnglish.big'];
+  for (const path of stale) {
+    try {
+      if (await storage.has(path)) {
+        await storage.remove(path);
+      }
+    } catch {}
+  }
+
+  // Step 2: download missing/changed files.
   const installed = (await storage.readMeta('installed-manifest')) || { files: {} };
   const installedByPath = installed.files || {};
 
-  // Diff: download when the hash differs or the stored size mismatches.
   const toDownload = [];
   let totalBytes = 0;
   for (const f of manifest.files) {
-    if (skipLang.includes(f.path)) {
-      console.log('[loader] пропуск (' + lang + '): ' + f.path);
-      continue;
-    }
+    if (!allowed.has(f.path)) continue;
     const have = installedByPath[f.path];
     if (have && have.sha256 === f.sha256) {
       const size = await storage.fileSize(f.path);
-      if (size === f.size) continue; // present and intact by size
+      if (size === f.size) continue;
     }
     toDownload.push(f);
     totalBytes += f.size;
   }
 
-  if (toDownload.length === 0) {
-    console.log('[loader] все файлы уже в кеше (' + manifest.files.length + ' шт.)');
-    return manifest;
-  }
+  if (toDownload.length > 0) {
+    const est = await storage.estimate();
+    if (est && est.quota && est.quota - (est.usage || 0) < totalBytes) {
+      throw new Error(
+        'Недостаточно места в хранилище браузера: нужно ' + gxHuman(totalBytes) +
+        ', доступно ' + gxHuman(est.quota - (est.usage || 0)) + '.'
+      );
+    }
+    await storage.requestPersist();
 
-  // Quota check before a big first download.
-  const est = await storage.estimate();
-  if (est && est.quota && est.quota - (est.usage || 0) < totalBytes) {
-    throw new Error(
-      'Недостаточно места в хранилище браузера: нужно ' + gxHuman(totalBytes) +
-      ', доступно ' + gxHuman(est.quota - (est.usage || 0)) + '.'
-    );
-  }
-  await storage.requestPersist();
+    console.log('[loader] к загрузке: ' + toDownload.length + ' файлов, ' + gxHuman(totalBytes));
+    let done = 0;
+    gxUI.progress(0, totalBytes, 'Загрузка файлов игры: ' + gxHuman(totalBytes));
 
-  console.log('[loader] к загрузке: ' + toDownload.length + ' файлов, ' + gxHuman(totalBytes));
-  let done = 0;
-  gxUI.progress(0, totalBytes, 'Загрузка файлов игры: ' + gxHuman(totalBytes));
-
-  // Up to 4 parallel downloads.
-  const queue = toDownload.slice();
-  const workers = [];
-  const concurrency = Math.min(4, queue.length);
-  for (let i = 0; i < concurrency; i++) {
-    workers.push((async () => {
-      for (;;) {
-        const f = queue.shift();
-        if (!f) return;
-        const url = gxAssetUrl(f);
-        for (let attempt = 1; ; attempt++) {
-          try {
-            const r = await fetch(url);
-            if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + f.path);
-            const written = await storage.writeStream(f.path, r, (n) => {
-              done += n;
-              gxUI.progress(done, totalBytes,
-                'Загрузка: ' + gxHuman(done) + ' / ' + gxHuman(totalBytes));
-            });
-            if (written !== f.size) throw new Error('размер не совпал: ' + f.path);
-            installedByPath[f.path] = { sha256: f.sha256, size: f.size };
-            break;
-          } catch (e) {
-            console.warn('[loader] попытка ' + attempt + ' не удалась для ' + f.path + ':', e);
-            await storage.remove(f.path);
-            if (attempt >= 3) throw e;
+    const queue = toDownload.slice();
+    const workers = [];
+    const concurrency = Math.min(4, queue.length);
+    for (let i = 0; i < concurrency; i++) {
+      workers.push((async () => {
+        for (;;) {
+          const f = queue.shift();
+          if (!f) return;
+          const url = gxAssetUrl(f);
+          for (let attempt = 1; ; attempt++) {
+            try {
+              const r = await fetch(url);
+              if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + f.path);
+              const written = await storage.writeStream(f.path, r, (n) => {
+                done += n;
+                gxUI.progress(done, totalBytes,
+                  'Загрузка: ' + gxHuman(done) + ' / ' + gxHuman(totalBytes));
+              });
+              if (written !== f.size) throw new Error('размер не совпал: ' + f.path);
+              installedByPath[f.path] = { sha256: f.sha256, size: f.size };
+              break;
+            } catch (e) {
+              console.warn('[loader] попытка ' + attempt + ' не удалась для ' + f.path + ':', e);
+              try { await storage.remove(f.path); } catch {}
+              if (attempt >= 3) throw e;
+            }
           }
         }
-      }
-    })());
+      })());
+    }
+    await Promise.all(workers);
+  } else {
+    console.log('[loader] все файлы уже в кеше (' + manifest.files.length + ' шт.)');
   }
-  await Promise.all(workers);
 
   installed.files = installedByPath;
   installed.version = manifest.version;
   await storage.writeMeta('installed-manifest', installed);
-  // Clean up stale language files from a previous language selection.
-  // After a language switch the diff loop skips the wrong-language files,
-  // but they still occupy space and the game's BIG scanner would load them.
-  const cleanLang = isEnglish
-    ? ['00RussianZH.big', 'GameDataGenerals/0!Russian.big',
-       'GameDataGenerals/00Russian.big', 'GameDataGenerals/Audio.big',
-       'GameDataGenerals/Speech.big', 'Data/Movies/Russian_VS_small.bik']
-    : ['AudioEnglishZH.big', 'EnglishZH.big', 'SpeechEnglishZH.big',
-       'W3DEnglishZH.big', 'GameDataGenerals/AudioEnglish.big',
-       'GameDataGenerals/English.big', 'GameDataGenerals/SpeechEnglish.big'];
-  for (const path of cleanLang) {
-    try {
-      const have = await storage.has(path);
-      if (have) {
-        await storage.remove(path);
-        console.log('[loader] очищен устаревший файл: ' + path);
-      }
-    } catch (e) {
-      console.log('[loader] не удалось очистить ' + path + ': ' + e);
-    }
-  }
   console.log('[loader] загрузка завершена');
-  return manifest;
+  return { manifest, allowed };
 }
 
 // IndexedDB mode: the wasm side can't read IDB, so materialize every file as
 // an ArrayBuffer on window.gxFiles; WebMain.cpp copies them into a WASMFS
 // js-file-backend mount at startup (JS memory, not wasm heap).
-async function gxMaterializeForIdb(storage, manifest) {
+async function gxMaterializeForIdb(storage, manifest, allowed) {
+  const targets = allowed ? manifest.files.filter(f => allowed.has(f.path)) : manifest.files;
+  const total = targets.length;
   gxUI.status('Подготовка файлов (IndexedDB режим)…');
   const files = [];
   let done = 0;
-  const total = manifest.files.length;
-  for (const f of manifest.files) {
+  for (const f of targets) {
     files.push({ path: f.path, data: await storage.readBytes(f.path) });
     done++;
     if (done % 5 === 0 || done === total) {
@@ -275,19 +266,15 @@ async function gxBoot() {
     document.getElementById('gx-storage-kind').textContent =
       storage.kind === 'opfs' ? 'OPFS' : 'IndexedDB (fallback)';
 
-    const manifest = await gxSyncAssets(storage);
+    // Show play button and settings BEFORE downloading anything:
+    // language and FPS settings are persisted in localStorage and read by
+    // game.js; we read them here for the filter and the engine arguments.
+    document.getElementById('gx-progress-wrap').style.display = 'none';
+    gxUI.progress(1, 1, 'Настройте язык и нажмите Играть');
 
-    if (storage.kind === 'idb') {
-      await gxMaterializeForIdb(storage, manifest);
-    }
-
-    // Wait for the user gesture: unlocks WebAudio and feels intentional.
-    gxUI.progress(1, 1, 'Готово к запуску');
     const btn = document.getElementById('gx-play');
     btn.style.display = 'inline-block';
-    document.getElementById('gx-progress-wrap').style.display = 'none';
 
-    // Pre-launch settings (persisted in localStorage, consumed by game.js).
     const settingsBtn = document.getElementById('gx-settings-btn');
     const settingsBox = document.getElementById('gx-settings');
     const fpsSel = document.getElementById('gx-fps');
@@ -301,13 +288,27 @@ async function gxBoot() {
     settingsBtn.style.display = 'inline-block';
     settingsBtn.addEventListener('click', () => { settingsBox.hidden = !settingsBox.hidden; });
 
+    // Wait for Play — language is now locked.
     await new Promise((resolve) => btn.addEventListener('click', resolve, { once: true }));
     btn.style.display = 'none';
     settingsBtn.style.display = 'none';
     settingsBox.hidden = true;
 
+    // NOW sync assets with the chosen language (the user may have changed it
+    // after the last play; gxSyncAssets deletes stale language BIGs first).
+    document.getElementById('gx-progress-wrap').style.display = 'block';
+    gxUI.bar.style.width = '0%';
+    gxUI.label.textContent = '0%';
+    const lang = localStorage.getItem('gx-lang') || 'english';
+    const { manifest, allowed } = await gxSyncAssets(storage, lang);
+
+    if (storage.kind === 'idb') {
+      await gxMaterializeForIdb(storage, manifest, allowed);
+    }
+
+    document.getElementById('gx-progress-wrap').style.display = 'none';
     gxUI.status('Запуск движка…');
-    await gxStartGame(); // game.js
+    await gxStartGame();
     gxUI.overlay.style.display = 'none';
   } catch (e) {
     gxUI.error(e && e.message ? e.message : String(e));
