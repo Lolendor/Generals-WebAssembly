@@ -31,6 +31,10 @@
 // INCLUDES ///////////////////////////////////////////////////////////////////////////////////////
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>  // MAIN_THREAD_EM_ASM (web multiplayer room panel hooks)
+#endif
+
 #include "Lib/BaseType.h"
 #include "Common/crc.h"
 #include "Common/GameEngine.h"
@@ -363,6 +367,11 @@ static void playerTooltip(GameWindow *window,
 //-------------------------------------------------------------------------------------------------
 void LanLobbyMenuInit( WindowLayout *layout, void *userData )
 {
+#ifdef __EMSCRIPTEN__
+	// GeneralsX @build web-port 5b 08/07/2026 Reveal the shell's WebRTC room
+	// panel while the player is in the LAN (multiplayer) lobby.
+	MAIN_THREAD_EM_ASM({ if (typeof gxShowMultiplayer === 'function') gxShowMultiplayer(); });
+#endif
 	LANnextScreen = nullptr;
 	LANbuttonPushed = false;
 	LANisShuttingDown = false;
@@ -547,6 +556,11 @@ static void shutdownComplete( WindowLayout *layout )
 //-------------------------------------------------------------------------------------------------
 void LanLobbyMenuShutdown( WindowLayout *layout, void *userData )
 {
+#ifdef __EMSCRIPTEN__
+	// GeneralsX @build web-port 5b 08/07/2026 Hide the room panel on leaving the
+	// LAN lobby (but keep any established mesh alive for the in-game session).
+	MAIN_THREAD_EM_ASM({ if (typeof gxHideMultiplayer === 'function') gxHideMultiplayer(); });
+#endif
 	LANPreferences prefs;
 	prefs["UserName"] = UnicodeStringToQuotedPrintable(GadgetTextEntryGetText( textEntryPlayerName ));
 	prefs.write();

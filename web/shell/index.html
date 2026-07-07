@@ -74,10 +74,66 @@
     background: #2a1616; color: #f0b0b0; font-size: 13px; line-height: 1.5;
     white-space: pre-wrap; text-align: left;
   }
+  /* Floating multiplayer panel (over the running game canvas) */
+  #gx-mp {
+    position: fixed; top: 10px; right: 10px; z-index: 20;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  #gx-mp-toggle {
+    padding: 6px 14px; font-size: 12px; letter-spacing: .5px; cursor: pointer;
+    color: #0b0e11; background: linear-gradient(180deg, #e8b64c, #b9821f);
+    border: none; border-radius: 5px; font-weight: 700; opacity: .85;
+  }
+  #gx-mp-toggle:hover { opacity: 1; }
+  #gx-mp-panel {
+    margin-top: 6px; width: 260px; padding: 14px;
+    background: rgba(19,27,36,.97); border: 1px solid #2c3a4a; border-radius: 8px;
+    color: #d8dee6; font-size: 13px; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  }
+  #gx-mp-panel[hidden] { display: none; }
+  #gx-mp-panel h4 { margin: 0 0 10px; font-size: 13px; color: #e8b64c; letter-spacing: 1px; }
+  #gx-mp-panel .row { display: flex; gap: 6px; margin-bottom: 8px; }
+  #gx-mp-panel button {
+    flex: 1; padding: 8px; font-size: 12px; cursor: pointer;
+    color: #d8dee6; background: #1d2733; border: 1px solid #2c3a4a; border-radius: 5px;
+  }
+  #gx-mp-panel button:hover { background: #253242; }
+  #gx-mp-panel input {
+    width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 8px;
+    font-size: 14px; letter-spacing: 2px; text-align: center; text-transform: uppercase;
+    color: #e8b64c; background: #0f1620; border: 1px solid #2c3a4a; border-radius: 5px;
+  }
+  #gx-mp-key {
+    font-size: 20px; letter-spacing: 3px; text-align: center; color: #e8b64c;
+    margin: 8px 0; user-select: all; cursor: copy;
+  }
+  #gx-mp-status { font-size: 11px; opacity: .75; margin-top: 8px; min-height: 28px; line-height: 1.4; }
+  #gx-mp-peers { font-size: 11px; opacity: .6; margin-top: 4px; }
 </style>
 </head>
 <body>
 <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+
+<div id="gx-mp" hidden>
+  <button id="gx-mp-toggle" type="button">Сетевая игра</button>
+  <div id="gx-mp-panel" hidden>
+    <h4>СЕТЕВАЯ ИГРА</h4>
+    <div class="row">
+      <button id="gx-mp-host" type="button">Создать</button>
+      <button id="gx-mp-join" type="button">Войти</button>
+    </div>
+    <div id="gx-mp-hostbox" hidden>
+      <div style="font-size:11px;opacity:.6">Код комнаты (передайте игрокам):</div>
+      <div id="gx-mp-key">—</div>
+    </div>
+    <div id="gx-mp-joinbox" hidden>
+      <input id="gx-mp-keyinput" maxlength="9" placeholder="XXXX-XXXX" />
+      <button id="gx-mp-connect" type="button" style="width:100%">Подключиться</button>
+    </div>
+    <div id="gx-mp-status">Не подключено.</div>
+    <div id="gx-mp-peers"></div>
+  </div>
+</div>
 
 <div id="gx-overlay">
   <div id="gx-title">C&amp;C GENERALS: ZERO HOUR</div>
@@ -120,6 +176,9 @@
 <script src="brotli.min.js"></script>
 <script src="storage.js"></script>
 <script src="signaling.js"></script>
+<script src="netbridge.js"></script>
+<script src="lobby.js"></script>
+<script src="mp-ui.js"></script>
 <script src="game.js"></script>
 <script src="loader.js"></script>
 </body>

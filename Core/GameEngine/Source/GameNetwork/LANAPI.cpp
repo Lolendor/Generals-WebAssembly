@@ -24,6 +24,10 @@
 
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>  // MAIN_THREAD_EM_ASM_INT (web mesh epoch → force re-announce)
+#endif
+
 #define WIN32_LEAN_AND_MEAN  // only bare bones windows stuff wanted
 
 #include "Common/crc.h"
@@ -332,6 +336,38 @@ void LANAPI::update()
 	{
 		return;
 	}
+
+#ifdef __EMSCRIPTEN__
+	// GeneralsX @build web-port 5b 08/07/2026 When a WebRTC peer connects or
+	// drops mid-lobby, the JS mesh bumps gxNet.meshEpoch. Force an immediate
+	// "I'm here" re-announce (reset the resend timer) so the player/game lists
+	// refresh at once instead of waiting up to s_resendDelta (10s).
+	//
+	// Also re-sync m_localIP from the lobby-assigned virtual IP: a joiner may
+	// have entered the LAN menu before the host welcomed it (myVip still 0), in
+	// which case IPEnumeration handed out the 10.77.0.1 fallback — identical to
+	// the host's IP. That makes the joiner mistake the host's announces for its
+	// own echo (senderIP == m_localIP) and drop them, so it never sees anyone.
+	{
+		static Int s_lastMeshEpoch = -1;
+		const Int epoch = MAIN_THREAD_EM_ASM_INT({
+			return (typeof gxNet !== 'undefined') ? (gxNet.meshEpoch | 0) : 0;
+		});
+		const UnsignedInt vip = (UnsignedInt)MAIN_THREAD_EM_ASM_INT({
+			return (typeof gxNet !== 'undefined') ? (gxNet.myVip >>> 0) : 0;
+		});
+		if (vip != 0 && vip != m_localIP)
+		{
+			m_localIP = vip;       // adopt our real virtual IP (fixes self-echo)
+			m_lastResendTime = 0;  // re-announce with the corrected identity
+		}
+		if (epoch != s_lastMeshEpoch)
+		{
+			s_lastMeshEpoch = epoch;
+			m_lastResendTime = 0; // makes the periodic announce block below fire now
+		}
+	}
+#endif
 
 	// Let the UDP socket breathe
 	if ((m_transport->update() == FALSE) && (LANSocketErrorDetected == FALSE)) {

@@ -30,6 +30,11 @@
 // SYSTEM INCLUDES ////////////////////////////////////////////////////////////
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 
+// The browser has no UDP sockets — the Emscripten build replaces this whole
+// translation unit with WebUDP.cpp (a JS peer-mesh bridge). Compile out here so
+// the two do not provide duplicate UDP:: symbols.
+#ifndef __EMSCRIPTEN__
+
 // USER INCLUDES //////////////////////////////////////////////////////////////
 #include "Common/GameEngine.h"
 //#include "GameNetwork/NetworkInterface.h"
@@ -536,3 +541,5 @@ Int UDP::AllowBroadcasts(Bool status)
 	else
 		return FALSE;
 }
+
+#endif // !__EMSCRIPTEN__

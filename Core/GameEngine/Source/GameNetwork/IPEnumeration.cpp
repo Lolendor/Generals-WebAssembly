@@ -28,7 +28,9 @@
 #include "GameNetwork/networkutil.h"
 #include "GameClient/ClientInstance.h"
 
-#ifndef _WIN32
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#elif !defined(_WIN32)
 #include <errno.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -62,6 +64,25 @@ EnumeratedIP * IPEnumeration::getAddresses()
 	if (m_IPlist)
 		return m_IPlist;
 
+#ifdef __EMSCRIPTEN__
+	// GeneralsX @build web-port 5b 08/07/2026 The browser has no network
+	// interfaces; report the lobby-assigned virtual IP (10.77.0.N) from the JS
+	// mesh bridge so the LAN menus show/address the player by that address.
+	// Falls back to 10.77.0.1 before the mesh is up (host, pre-join).
+	{
+		UnsignedInt vip = (UnsignedInt)MAIN_THREAD_EM_ASM_INT({
+			return (typeof gxNet !== 'undefined' && gxNet.myVip) ? (gxNet.myVip >>> 0) : 0;
+		});
+		if (vip == 0) vip = (10u << 24) | (77u << 16) | 1u; // 10.77.0.1
+		addNewIP(
+			(UnsignedByte)((vip >> 24) & 0xFF),
+			(UnsignedByte)((vip >> 16) & 0xFF),
+			(UnsignedByte)((vip >> 8) & 0xFF),
+			(UnsignedByte)(vip & 0xFF));
+		return m_IPlist;
+	}
+#endif
+
 	if (!m_isWinsockInitialized)
 	{
 		WORD verReq = MAKEWORD(2, 2);
@@ -90,7 +111,7 @@ EnumeratedIP * IPEnumeration::getAddresses()
 			(UnsignedByte)(id));
 	}
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 	// GeneralsX @bugfix BenderAI 31/03/2026 Enumerate active IPv4 interfaces on non-Windows (POSIX) platforms instead of hostname resolution.
 	struct ifaddrs *ifaddr = nullptr;
 	if (getifaddrs(&ifaddr) == 0)
