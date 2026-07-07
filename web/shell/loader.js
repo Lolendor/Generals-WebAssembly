@@ -1,18 +1,24 @@
 // GeneralsX Web - asset loader.
 //
-// Builds: each build (e.g. default_ru) lives in its own directory under
-// /assets/{build}/ on the server, containing manifest.json + files/ subdir.
-// The user selects a build before pressing Play; assets for that build are
-// then downloaded and stored. Switching builds clears old cached files.
+// Streams build.data (GAXD format): reads index from stream start,
+// pipes compressed blob through DecompressionStream, splits decompressed
+// data into files and writes them to OPFS/IDB concurrently (4 in parallel).
 //
-// Coop/coep on bare static hosts is handled by coi-serviceworker.js.
-//
-// GeneralsX @build web-port 05/07/2026 - Web port Phase 1
+// GeneralsX @build web-port 06/07/2026
 
 'use strict';
 
 const gxUI = {
-  overlay: null, bar: null, label: null, detail: null,
+  overlay: null, detail: null,
+  dlBar: null, dlVal: null, unBar: null, unVal: null,
+  init() {
+    this.overlay = document.getElementById('gx-overlay');
+    this.detail = document.getElementById('gx-detail');
+    this.dlBar = document.getElementById('gx-bar');
+    this.dlVal = document.getElementById('gx-dl-val');
+    this.unBar = document.getElementById('gx-bar2');
+    this.unVal = document.getElementById('gx-un-val');
+  },
   error(msg) {
     console.error('[loader]', msg);
     const el = document.getElementById('gx-error');
@@ -20,34 +26,91 @@ const gxUI = {
     el.textContent = msg;
     document.getElementById('gx-progress-wrap').style.display = 'none';
   },
-  progress(done, total, detail) {
+  download(done, total, detail) {
     const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
-    this.bar.style.width = pct + '%';
-    this.label.textContent = pct + '%';
+    this.dlBar.style.width = pct + '%';
+    this.dlVal.textContent = total > 0 ? gxHuman(done) + ' / ' + gxHuman(total) : gxHuman(done);
     if (detail) this.detail.textContent = detail;
+  },
+  unpack(done, total) {
+    const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+    this.unBar.style.width = pct + '%';
+    this.unVal.textContent = done + ' / ' + total;
   },
   status(text) { this.detail.textContent = text; },
 };
 
-function gxHuman(bytes) {
-  if (bytes > 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' ГБ';
-  if (bytes > 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' МБ';
-  if (bytes > 1024) return (bytes / 1024).toFixed(0) + ' КБ';
-  return bytes + ' Б';
+function gxHuman(b) {
+  if (b > 1073741824) return (b / 1073741824).toFixed(2) + ' ГБ';
+  if (b > 1048576) return (b / 1048576).toFixed(1) + ' МБ';
+  if (b > 1024) return (b / 1024).toFixed(0) + ' КБ';
+  return b + ' Б';
 }
+
+// ── Stream extraction (worker-driven) ────────────────────────────────────
+// The worker fetches build.data itself and runs the whole pipeline (parse index,
+// brotli decompress, write to OPFS/IDB) on its own thread — no cross-thread
+// chunk flood. The main thread only relays progress to the UI.
+// Returns { files, entries } (entries needed for IDB materialization).
+
+async function gxStreamExtract(url, storage) {
+  const worker = new Worker('unpack-worker.js');
+  const wasmUrl = new URL('brotli_bg.wasm', document.baseURI).href;
+  let entries = null;
+
+  const result = await new Promise((resolve, reject) => {
+    worker.addEventListener('message', (ev) => {
+      const m = ev.data;
+      if (m.type === 'download') {
+        gxUI.download(m.received, m.total);          // gold bar — network
+      } else if (m.type === 'index') {
+        entries = m.entries;
+        gxUI.unpack(0, entries.length);
+      } else if (m.type === 'progress') {
+        gxUI.unpack(m.done, m.total);                // green bar — decompress+write
+      } else if (m.type === 'complete') {
+        resolve({ files: m.files, entries: m.entries });
+      } else if (m.type === 'error') {
+        reject(new Error(m.message));
+      }
+    });
+    worker.addEventListener('error', (e) => reject(new Error('Worker: ' + e.message)));
+    worker.postMessage({ type: 'start', url, wasmUrl, mode: storage.kind });
+  });
+
+  worker.terminate();
+  return result;
+}
+
+// ── Checks & init ────────────────────────────────────────────────────────────
 
 async function gxCheckEnvironment() {
   if (!crossOriginIsolated) {
     if (window.gxCoiPending) {
-      gxUI.status('Настройка окружения (страница перезагрузится)…');
+      gxUI.status('Настройка окружения…');
       await new Promise((r) => setTimeout(r, 4000));
     }
-    if (!crossOriginIsolated) throw new Error(
-      'SharedArrayBuffer недоступен (нет crossOriginIsolated).\n' +
-      'Откройте сайт по HTTPS или localhost.');
+    if (!crossOriginIsolated) throw new Error('SharedArrayBuffer недоступен. Используйте HTTPS.');
   }
-  if (typeof WebAssembly === 'undefined')
-    throw new Error('Браузер не поддерживает WebAssembly.');
+  if (typeof WebAssembly === 'undefined') throw new Error('WebAssembly не поддерживается.');
+}
+
+// IndexedDB mode: load every stored file into window.gxFiles for the engine
+// (OPFS mode reads the mounted filesystem directly, so this is a no-op there).
+async function gxMaterializeIdb(storage) {
+  const paths = (await storage.listPaths()).filter(k => typeof k === 'string');
+  const assetPaths = paths.filter(k => !k.startsWith('meta/'));
+  const files = [];
+  for (let i = 0; i < assetPaths.length; i++) {
+    files.push({ path: assetPaths[i], data: await storage.readBytes(assetPaths[i]) });
+    if (i % 20 === 0) gxUI.unpack(i, assetPaths.length);
+  }
+  gxUI.unpack(assetPaths.length, assetPaths.length);
+  window.gxFiles = files;
+  window.gxIdbPutUserFile = (path, bytes) => {
+    storage.writeBlob('userdata/' + path, new Blob([bytes])).catch(e =>
+      console.warn('[loader] userdata write-back failed:', path, e));
+  };
 }
 
 async function gxLoadNetConfig() {
@@ -59,127 +122,15 @@ async function gxLoadNetConfig() {
       window.gxNetConfig.iceServers = cfg.iceServers;
     if (cfg && Array.isArray(cfg.mqttBrokers) && cfg.mqttBrokers.length)
       window.gxNetConfig.mqttBrokers = cfg.mqttBrokers;
-    console.log('[loader] сетевой конфиг из ice.json применён');
   } catch (e) {
-    console.warn('[loader] ice.json не прочитан, использую значения по умолчанию:', e);
+    console.warn('[loader] ice.json не прочитан:', e);
   }
 }
 
-// Manifest + file URL for a given build name.
-const gxAssetUrl = (build) => (f) =>
-  'assets/' + encodeURIComponent(build) + '/files/' +
-  f.path.split('/').map(encodeURIComponent).join('/') +
-  '?v=' + f.sha256.slice(0, 12);
-
-async function gxSyncAssets(storage, build) {
-  const assetUrl = gxAssetUrl(build);
-  console.log('[loader] синхронизация сборки: ' + build);
-
-  gxUI.status('Получаю список файлов…');
-  const resp = await fetch('assets/' + encodeURIComponent(build) + '/manifest.json', { cache: 'no-cache' });
-  if (!resp.ok) throw new Error('манифест сборки ' + build + ' недоступен: HTTP ' + resp.status);
-  const manifest = await resp.json();
-
-  const installed = (await storage.readMeta('installed-manifest-' + build)) || { files: {} };
-  const installedByPath = installed.files || {};
-
-  const toDownload = [];
-  let totalBytes = 0;
-  for (const f of manifest.files) {
-    const have = installedByPath[f.path];
-    if (have && have.sha256 === f.sha256) {
-      const size = await storage.fileSize(f.path);
-      if (size === f.size) continue;
-    }
-    toDownload.push(f);
-    totalBytes += f.size;
-  }
-
-  if (toDownload.length === 0) {
-    console.log('[loader] все файлы сборки ' + build + ' уже в кеше (' + manifest.files.length + ' шт.)');
-    return manifest;
-  }
-
-  const est = await storage.estimate();
-  if (est && est.quota && est.quota - (est.usage || 0) < totalBytes)
-    throw new Error('Недостаточно места: нужно ' + gxHuman(totalBytes) +
-      ', доступно ' + gxHuman(est.quota - (est.usage || 0)) + '.');
-  await storage.requestPersist();
-
-  console.log('[loader] к загрузке: ' + toDownload.length + ' файлов, ' + gxHuman(totalBytes));
-  let done = 0;
-  gxUI.progress(0, totalBytes, 'Загрузка файлов игры: ' + gxHuman(totalBytes));
-
-  const queue = toDownload.slice();
-  const concurrency = Math.min(4, queue.length);
-  const workers = [];
-  for (let i = 0; i < concurrency; i++) {
-    workers.push((async () => {
-      for (;;) {
-        const f = queue.shift();
-        if (!f) return;
-        for (let attempt = 1; ; attempt++) {
-          try {
-            const r = await fetch(assetUrl(f));
-            if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + f.path);
-            const written = await storage.writeStream(f.path, r, (n) => {
-              done += n;
-              gxUI.progress(done, totalBytes,
-                'Загрузка: ' + gxHuman(done) + ' / ' + gxHuman(totalBytes));
-            });
-            if (written !== f.size) throw new Error('размер не совпал: ' + f.path);
-            installedByPath[f.path] = { sha256: f.sha256, size: f.size };
-            break;
-          } catch (e) {
-            console.warn('[loader] попытка ' + attempt + ' не удалась для ' + f.path + ':', e);
-            try { await storage.remove(f.path); } catch {}
-            if (attempt >= 3) throw e;
-          }
-        }
-      }
-    })());
-  }
-  await Promise.all(workers);
-
-  installed.files = installedByPath;
-  installed.version = manifest.version;
-  await storage.writeMeta('installed-manifest-' + build, installed);
-  console.log('[loader] загрузка сборки ' + build + ' завершена');
-  return manifest;
-}
-
-// IndexedDB mode: materialize every file as ArrayBuffer on window.gxFiles.
-async function gxMaterializeForIdb(storage, manifest) {
-  gxUI.status('Подготовка файлов (IndexedDB режим)…');
-  const files = [];
-  let done = 0;
-  const total = manifest.files.length;
-  for (const f of manifest.files) {
-    files.push({ path: f.path, data: await storage.readBytes(f.path) });
-    done++;
-    if (done % 5 === 0 || done === total)
-      gxUI.progress(done, total, 'Подготовка файлов: ' + done + ' / ' + total);
-  }
-  try {
-    const extra = (await storage.listPaths()).filter((k) => typeof k === 'string' && k.startsWith('userdata/'));
-    for (const k of extra)
-      files.push({ path: k, data: await storage.readBytes(k) });
-    if (extra.length) console.log('[loader] восстановлено файлов пользователя из IndexedDB:', extra.length);
-  } catch (e) {
-    console.warn('[loader] не удалось восстановить userdata из IndexedDB:', e);
-  }
-  window.gxFiles = files;
-  window.gxIdbPutUserFile = (path, bytes) => {
-    storage.writeBlob('userdata/' + path, new Blob([bytes])).catch((e) =>
-      console.warn('[loader] userdata write-back failed:', path, e));
-  };
-}
+// ── Boot ─────────────────────────────────────────────────────────────────────
 
 async function gxBoot() {
-  gxUI.overlay = document.getElementById('gx-overlay');
-  gxUI.bar = document.getElementById('gx-bar');
-  gxUI.label = document.getElementById('gx-pct');
-  gxUI.detail = document.getElementById('gx-detail');
+  gxUI.init();
 
   try {
     await gxCheckEnvironment();
@@ -191,9 +142,9 @@ async function gxBoot() {
     document.getElementById('gx-storage-kind').textContent =
       storage.kind === 'opfs' ? 'OPFS' : 'IndexedDB (fallback)';
 
-    // Show Play + settings BEFORE downloading anything.
+    // Show settings + play immediately
     document.getElementById('gx-progress-wrap').style.display = 'none';
-    gxUI.progress(1, 1, 'Выберите сборку и нажмите Играть');
+    gxUI.status('Настройте сборку и нажмите Играть');
 
     const btn = document.getElementById('gx-play');
     btn.style.display = 'inline-block';
@@ -213,41 +164,60 @@ async function gxBoot() {
     settingsBtn.style.display = 'inline-block';
     settingsBtn.addEventListener('click', () => { settingsBox.hidden = !settingsBox.hidden; });
 
-    // Wait for Play — build is now locked.
     await new Promise((resolve) => btn.addEventListener('click', resolve, { once: true }));
     btn.style.display = 'none';
     settingsBtn.style.display = 'none';
     settingsBox.hidden = true;
 
-    // Sync assets for the selected build.
-    document.getElementById('gx-progress-wrap').style.display = 'block';
-    gxUI.bar.style.width = '0%';
-    gxUI.label.textContent = '0%';
     const build = localStorage.getItem('gx-build') || 'default_ru';
+    const markerKey = 'installed-' + build;
 
-    // Detect build switch: if the previous build differs, wipe all game files
-    // so stale BIGs from the old build don't leak into the new one.
-    const prevBuild = localStorage.getItem('gx-prev-build');
-    if (prevBuild && prevBuild !== build) {
-      console.log('[loader] смена сборки: ' + prevBuild + ' -> ' + build + ', очистка…');
-      const allPaths = (await storage.listPaths()).filter(
-        (k) => typeof k === 'string' && !k.startsWith('userdata/') && k !== 'installed-manifest' &&
-               !k.startsWith('installed-manifest-'));
-      let cleared = 0;
-      for (const p of allPaths) {
-        try { await storage.remove(p); cleared++; } catch {}
+    // Stage 1: download the engine (wasm) into memory, with progress. Always
+    // needed — done before resources so a fresh install and a cached reload both
+    // fetch the engine here, and the engine never fetches its own wasm later.
+    document.getElementById('gx-progress-wrap').style.display = 'block';
+    gxUI.download(0, 0);
+    gxUI.unpack(0, 0);
+    gxUI.status('Загрузка движка…');
+    await gxPreloadEngine((received, total) => gxUI.download(received, total));
+
+    // Already installed? Skip the resource download/unpack and go straight to play.
+    const marker = await storage.readMeta(markerKey);
+    if (marker && marker.complete) {
+      console.log('[loader] сборка ' + build + ' уже установлена (' + marker.files + ' файлов) — пропускаю загрузку');
+      if (storage.kind === 'idb') {
+        gxUI.status('Подготовка файлов…');
+        await gxMaterializeIdb(storage);
       }
-      if (cleared) console.log('[loader] удалено старых файлов: ' + cleared);
+      gxUI.status('Запуск движка…');
+      document.getElementById('gx-progress-wrap').style.display = 'none';
+      await gxStartGame();
+      gxUI.overlay.style.display = 'none';
+      return;
     }
-    localStorage.setItem('gx-prev-build', build);
 
-    const manifest = await gxSyncAssets(storage, build);
+    // Stage 2: download + unpack game resources.
+    gxUI.download(0, 0);
+    gxUI.unpack(0, 0);
 
-    if (storage.kind === 'idb')
-      await gxMaterializeForIdb(storage, manifest);
+    // The worker fetches, parses the index, decompresses, and writes files to
+    // storage — download and unpack progress run in parallel.
+    const url = 'assets/' + encodeURIComponent(build) + '/build.data?cb=' + Date.now();
+    gxUI.status('Загрузка и распаковка ресурсов…');
+    const result = await gxStreamExtract(url, storage);
+    console.log('[loader] распаковано ' + result.files + ' файлов');
 
-    document.getElementById('gx-progress-wrap').style.display = 'none';
+    // IndexedDB mode: materialize files into window.gxFiles for the engine.
+    if (storage.kind === 'idb') {
+      gxUI.status('Подготовка файлов…');
+      await gxMaterializeIdb(storage);
+    }
+
+    // Mark this build installed so a page reload skips the download.
+    await storage.writeMeta(markerKey, { complete: true, files: result.files, ts: Date.now() });
+
     gxUI.status('Запуск движка…');
+    document.getElementById('gx-progress-wrap').style.display = 'none';
     await gxStartGame();
     gxUI.overlay.style.display = 'none';
   } catch (e) {

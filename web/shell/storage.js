@@ -177,6 +177,14 @@ class OpfsStorage {
     } catch {}
   }
 
+  async writeBlob(path, blob) {
+    const { dir, name } = await this._dir(gxStoragePath(path), true);
+    const fh = await dir.getFileHandle(name, { create: true });
+    const w = await fh.createWritable();
+    await w.write(blob);
+    await w.close();
+  }
+
   async estimate() {
     try {
       return await navigator.storage.estimate();

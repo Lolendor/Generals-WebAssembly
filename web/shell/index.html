@@ -23,15 +23,24 @@
   #gx-title { font-size: 28px; letter-spacing: 2px; margin-bottom: 8px; color: #e8b64c; }
   #gx-sub { font-size: 13px; opacity: .6; margin-bottom: 40px; }
   #gx-progress-wrap { width: min(520px, 80vw); }
-  #gx-track {
-    width: 100%; height: 14px; border-radius: 7px;
+  .gx-prog { margin-bottom: 14px; }
+  .gx-prog:last-child { margin-bottom: 0; }
+  .gx-prog-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; margin-bottom: 5px; opacity: .8;
+  }
+  .gx-prog-head .gx-lbl { letter-spacing: .5px; }
+  .gx-prog-head .gx-val { font-variant-numeric: tabular-nums; opacity: .7; }
+  #gx-track, #gx-track2 {
+    width: 100%; height: 12px; border-radius: 6px;
     background: #1d2733; overflow: hidden; border: 1px solid #2c3a4a;
   }
-  #gx-bar {
+  #gx-bar, #gx-bar2 {
     width: 0%; height: 100%;
     background: linear-gradient(90deg, #b9821f, #e8b64c);
     transition: width .15s linear;
   }
+  #gx-bar2 { background: linear-gradient(90deg, #2f7d5b, #4fce8f); }
   #gx-pct { margin-top: 10px; font-size: 15px; }
   #gx-detail { margin-top: 6px; font-size: 12px; opacity: .65; min-height: 16px; }
   #gx-storage-kind { font-size: 11px; opacity: .4; margin-top: 18px; }
@@ -74,8 +83,14 @@
   <div id="gx-title">C&amp;C GENERALS: ZERO HOUR</div>
   <div id="gx-sub">веб-версия &middot; wasm + WebGL2</div>
   <div id="gx-progress-wrap">
-    <div id="gx-track"><div id="gx-bar"></div></div>
-    <div id="gx-pct">0%</div>
+    <div class="gx-prog">
+      <div class="gx-prog-head"><span class="gx-lbl">Загрузка</span><span class="gx-val" id="gx-dl-val">0%</span></div>
+      <div id="gx-track"><div id="gx-bar"></div></div>
+    </div>
+    <div class="gx-prog">
+      <div class="gx-prog-head"><span class="gx-lbl">Распаковка</span><span class="gx-val" id="gx-un-val">0%</span></div>
+      <div id="gx-track2"><div id="gx-bar2"></div></div>
+    </div>
   </div>
   <div id="gx-detail">Инициализация…</div>
   <button id="gx-play">Играть</button>
@@ -102,6 +117,7 @@
 </div>
 
 <script src="coi-serviceworker.js"></script>
+<script src="brotli.min.js"></script>
 <script src="storage.js"></script>
 <script src="signaling.js"></script>
 <script src="game.js"></script>

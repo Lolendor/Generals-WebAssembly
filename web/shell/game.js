@@ -7,6 +7,42 @@
 
 'use strict';
 
+// Cached engine payload from gxPreloadEngine(): the wasm binary + resolved
+// buildId, so gxStartGame() instantiates without any further network fetch.
+window.gxEngine = { wasmBinary: null, buildId: 'dev' };
+
+// Stage 1 (after Play, before resources): download GeneralsXZH.wasm into memory
+// with progress. Emscripten later instantiates from Module.wasmBinary, so the
+// engine never fetches the wasm itself (works on any static host, one place to
+// show progress). onProgress(received, total).
+async function gxPreloadEngine(onProgress) {
+  let buildId = 'dev';
+  try {
+    const r = await fetch('build.json', { cache: 'no-cache' });
+    if (r.ok) buildId = (await r.json()).buildId || 'dev';
+  } catch {}
+  window.gxEngine.buildId = buildId;
+
+  const resp = await fetch('GeneralsXZH.wasm?v=' + buildId);
+  if (!resp.ok) throw new Error('Движок недоступен: HTTP ' + resp.status);
+  const total = parseInt(resp.headers.get('Content-Length') || '0') || 0;
+
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+    if (onProgress) onProgress(received, total);
+  }
+  const bin = new Uint8Array(received);
+  let pos = 0;
+  for (const c of chunks) { bin.set(c, pos); pos += c.byteLength; }
+  window.gxEngine.wasmBinary = bin;
+}
+
 function gxGameArguments() {
   // Pass engine flags via URL: ?args=-headless+-noshellmap etc.
   const p = new URLSearchParams(location.search);
@@ -24,13 +60,9 @@ function gxGameArguments() {
 }
 
 async function gxStartGame() {
-  // Cache-buster for the engine code on dumb static hosts: browsers must
-  // never pair a stale cached GeneralsXZH.js with a newer .wasm.
-  let buildId = 'dev';
-  try {
-    const r = await fetch('build.json', { cache: 'no-cache' });
-    if (r.ok) buildId = (await r.json()).buildId || 'dev';
-  } catch {}
+  // Engine wasm was pre-downloaded by gxPreloadEngine() into window.gxEngine.
+  const buildId = window.gxEngine.buildId || 'dev';
+  const wasmBinary = window.gxEngine.wasmBinary;
 
   return new Promise((resolve, reject) => {
     const canvas = document.getElementById('canvas');
@@ -38,7 +70,9 @@ async function gxStartGame() {
     window.Module = {
       canvas: canvas,
       arguments: gxGameArguments(),
-      locateFile: (f) => f + '?v=' + buildId, // relative: wasm lives next to index.html
+      // Instantiate from the pre-downloaded binary — no wasm fetch here.
+      wasmBinary: wasmBinary,
+      locateFile: (f) => f + '?v=' + buildId, // for any other asset the JS glue needs
       // 0 = OPFS (WASMFS OPFS backend), 1 = IndexedDB (js-file backend +
       // population from window.gxFiles). Read by WebMain.cpp.
       gxStorageMode: window.gxStorageKind === 'idb' ? 1 : 0,
@@ -77,3 +111,4 @@ async function gxStartGame() {
 }
 
 window.gxStartGame = gxStartGame;
+window.gxPreloadEngine = gxPreloadEngine;

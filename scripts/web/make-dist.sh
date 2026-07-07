@@ -37,6 +37,7 @@ mkdir -p "$DIST"
 # ── Shell ─────────────────────────────────────────────────────────────────────
 echo "==> Shell"
 cp "$REPO_ROOT"/web/shell/*.js "$REPO_ROOT"/web/shell/index.html "$DIST/"
+cp "$REPO_ROOT"/web/shell/brotli_bg.wasm "$DIST/"   # brotli-wasm decoder blob
 if [ ! -f "$DIST/ice.json" ]; then
     cp "$REPO_ROOT/web/shell/ice.json" "$DIST/"
 else
@@ -77,7 +78,12 @@ printf '[\n' > "$DIST/assets/builds.json"
 first=true
 for name in "${BUILDS[@]}"; do
     $first || printf ',\n' >> "$DIST/assets/builds.json"
-    printf '  "%s"' "$name" >> "$DIST/assets/builds.json"
+    data="$DIST/assets/$name/build.data"
+    sz=0; fc=0
+    if [ -f "$data" ]; then
+        sz=$(stat -f%z "$data" 2>/dev/null || stat -c%s "$data" 2>/dev/null || echo 0)
+    fi
+    printf '  {"name":"%s","size":%d}' "$name" "$sz" >> "$DIST/assets/builds.json"
     first=false
 done
 printf '\n]\n' >> "$DIST/assets/builds.json"
