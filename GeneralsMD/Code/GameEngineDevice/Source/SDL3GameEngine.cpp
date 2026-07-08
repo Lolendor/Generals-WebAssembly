@@ -662,6 +662,27 @@ void SDL3GameEngine::pollSDL3Events(void)
 						keyboard->addSDLEvent(&event);
 					}
 				}
+#ifdef __EMSCRIPTEN__
+				// GeneralsX @build web-port 08/07/2026 Browsers never deliver
+				// Enter/Return through the text-input (SDL_EVENT_TEXT_INPUT) path
+				// - it is a key event only. GadgetTextEntry finishes an edit (send
+				// chat, confirm name) on GWM_IME_CHAR == VK_RETURN, which native
+				// platforms get from the OS IME. Synthesize that here from the
+				// Return key-down so chat/name entry fields submit.
+				if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+				    (event.key.scancode == SDL_SCANCODE_RETURN ||
+				     event.key.scancode == SDL_SCANCODE_KP_ENTER)) {
+					GameWindow* entry = m_TextInputFocusWindow;
+					if (entry && TheWindowManager &&
+					    BitIsSet(entry->winGetStyle(), GWS_ENTRY_FIELD)) {
+						// VK_RETURN (0x0D): GadgetTextEntry's GWM_IME_CHAR handler
+						// sends GEM_EDIT_DONE on this exact value.
+						const WindowMsgData GX_VK_RETURN = 0x0D;
+						TheWindowManager->winSendInputMsg(entry, GWM_IME_CHAR,
+							GX_VK_RETURN, 0);
+					}
+				}
+#endif
 				break;
 
 			case SDL_EVENT_TEXT_INPUT:
