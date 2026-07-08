@@ -2,18 +2,20 @@
 
 **Zero Hour running in the browser** — the real 2003 engine (~500k LOC of C++)
 compiled to WebAssembly via [Emscripten](https://emscripten.org). One click to
-play: open the site, the loader streams the game files and caches them
-**permanently in OPFS** (or IndexedDB where OPFS is unavailable) — the next
-visit starts instantly, fully offline-capable. Rendering is a custom
+play: open the site, press Play, the engine (wasm) and the game files stream in
+and are cached **permanently in OPFS** (IndexedDB where OPFS is unavailable) —
+the next visit starts instantly, fully offline-capable. Rendering is a custom
 **Direct3D 8 → WebGL2** translation layer (`d3d8webgl`); no Vulkan, no plugins.
+Multiplayer turns the game's LAN screens into an online lobby over **WebRTC**
+with a short room code — no dedicated server.
 
 **Static-first deployment**: the `web/dist/` bundle runs on *any* web server or
-static hosting — COOP/COEP headers (required for threads) are injected
-client-side by a service worker, STUN/TURN + signaling brokers live in an
-operator-editable `ice.json`, and multiplayer signaling (in progress) rides
-public MQTT-over-WebSocket brokers with a short room code — **no backend
+static hosting (GitHub Pages, nginx, `python3 -m http.server`, …). The
+COOP/COEP headers required for threads are injected client-side by a service
+worker; multiplayer signaling rides public MQTT-over-WebSocket brokers, and
+STUN/TURN + brokers live in an operator-editable `ice.json` — **no backend
 required**. An optional single-binary Go server is included for local dev and
-self-signed-TLS deployments on a bare IP.
+self-signed-TLS on a bare IP.
 
 This is a fork of
 [ammaarreshi/Generals-Mac-iOS-iPad](https://github.com/ammaarreshi/Generals-Mac-iOS-iPad)
@@ -29,36 +31,67 @@ browser/WASM target; the Apple-platform ports below still work.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Emscripten toolchain: the whole engine compiles, links, and boots in the browser | ✅ done |
-| 1 | Static bundle + loader UI, OPFS permanent cache (IndexedDB fallback), asset packing, optional Go server | ✅ done — verified on a real install: main menu runs in-browser with live game logic and audio |
-| 2 | `d3d8webgl` renderer: D3D8 fixed-function → WebGL2 | 🚧 next — until then there is no picture, engine runs headless |
-| 3 | Audio (OpenAL→WebAudio), input polish, saves | planned |
-| 4 | Video playback (FFmpeg-wasm, already builds) | wired |
-| 5 | Multiplayer: WebRTC DataChannels P2P (host relay), serverless MQTT signaling + room codes | signaling layer ready |
+| 1 | Static bundle + loader UI, OPFS permanent cache (IndexedDB fallback), asset packing, optional Go server | ✅ done |
+| 2 | `d3d8webgl` renderer: D3D8 fixed-function → WebGL2 | ✅ done — menus, shell map, skirmish render in-browser |
+| 3 | Audio (OpenAL→WebAudio), input, saves, TrueType fonts | ✅ done |
+| 4 | Video playback (FFmpeg-wasm) | wired |
+| 5 | Multiplayer: WebRTC mesh (host relay), serverless MQTT signaling + room codes | ✅ playable — LAN lobby ↔ online |
 
 Details and architecture: [`docs/WORKDIR/planning/WEB_PORT_PLAN.md`](docs/WORKDIR/planning/WEB_PORT_PLAN.md).
+
+## How it works
+
+- **Asset delivery.** A build's game files are packed by `scripts/web/pack-assets.sh`
+  into a single `build.data` archive (custom `GAXD` format): all files concatenated,
+  split into 64 MB segments, each Brotli-compressed **in parallel across CPU cores**
+  (quality 11). The client streams it, decompresses with `brotli-wasm` in a Web
+  Worker, and writes each file straight into OPFS via sync access handles as bytes
+  arrive — download and unpack run concurrently, peak RAM stays ~130 MB regardless
+  of the ~2 GB payload. `DecompressionStream('br')` is not usable (browsers ship
+  only gzip/deflate), hence `brotli-wasm`.
+- **Builds.** Drop a game folder under `web/gamedata/<build_name>/{GeneralsZH,Generals}`
+  and it packs to `web/dist/assets/<build_name>/build.data` with its own manifest;
+  the shell's settings menu lets the player pick a build before pressing Play. The
+  default build is `default_ru`.
+- **Multiplayer.** The game's single UDP transport is bridged (`WebUDP.cpp` →
+  `netbridge.js`) to a WebRTC peer mesh: the host is virtual IP `10.77.0.1` and
+  relays; joiners get `10.77.0.N`. LAN broadcasts fan out over the mesh, so the
+  game's LAN discovery/host/join menus become an online lobby unchanged. A floating
+  room panel (Create/Join with a `XXXX-XXXX` code) appears while in the LAN lobby.
 
 ## Quick start — Web
 
 ```sh
-# toolchain: emscripten 4.x, cmake 3.25+, ninja, go 1.22+
+# toolchain: emscripten 4.x, cmake 3.25+, ninja, python3 (+ brotli), go 1.22+ (optional)
 brew install emscripten cmake ninja go        # (or apt equivalents + emsdk)
+pip3 install brotli                            # used by the asset packer
 
 # 1. build the engine to wasm
 EMSCRIPTEN_ROOT=$(brew --prefix emscripten)/libexec cmake --preset emscripten
-cmake --build build/emscripten --target z_generals -j10
+cmake --build build/emscripten --target GeneralsXZH.js
 
-# 2. assemble the static bundle and pack YOUR game files into it
-scripts/web/make-dist.sh
-scripts/web/pack-assets.sh /path/to/GeneralsZH     # -> web/dist/assets
+# 2. put YOUR game files under web/gamedata/<build>/ then assemble the bundle
+#    web/gamedata/default_ru/GeneralsZH/   (Zero Hour install: *.big, Data/, Maps/)
+#    web/gamedata/default_ru/Generals/     (optional base-game .big set)
+scripts/web/make-dist.sh                       # copies shell+wasm, packs every build
 
-# 3. deploy: upload web/dist/ to any HTTPS static host. That's it.
-#    Or serve locally / on a bare IP with the optional Go server:
-cd web && go run ./server -dir ./dist                   # http://localhost:8080
-cd web && go run ./server -dir ./dist -tls-self-signed  # https://<your-ip>:8080
+#    (or pack a single build on its own — parallel Brotli, takes a few minutes)
+scripts/web/pack-assets.sh default_ru          # -> web/dist/assets/default_ru/build.data
+
+# 3. deploy: upload web/dist/ to any static host (GitHub Pages, nginx, ...).
+#    Or serve locally:
+python3 -m http.server -d web/dist 8000        # http://localhost:8000
+#    Or on a bare IP with self-signed TLS via the optional Go server:
+cd web && go run ./server -dir ./dist -tls-self-signed   # https://<your-ip>:8080
 ```
 
-Edit `web/dist/ice.json` to point at your own TURN servers or MQTT brokers.
-Debug flags: `?args=-headless`, `?storage=idb`.
+Fonts: the game ships no `.ttf`; `pack-assets.sh` stages `fonts/` (system Arial +
+Liberation) into the build so text renders. Edit `web/dist/ice.json` for your own
+TURN servers / MQTT brokers. Debug flags: `?args=-headless`, `?storage=idb`.
+
+To add another build (e.g. an English install), drop it in
+`web/gamedata/default_en/` and re-run `make-dist.sh` — it is discovered and packed
+automatically, and appears in the build selector.
 
 ---
 
