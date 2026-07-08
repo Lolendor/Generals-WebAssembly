@@ -97,9 +97,7 @@ async function gxStartGame() {
       },
       onExit: (code) => {
         console.log('[game] exited with code', code);
-        const el = document.getElementById('gx-error');
-        el.style.display = 'block';
-        el.textContent = 'Игра завершила работу (код ' + code + '). Обновите страницу, чтобы запустить снова.';
+        gxOnEngineExit();
       },
     };
 
@@ -110,5 +108,26 @@ async function gxStartGame() {
   });
 }
 
+// Called when the engine quits (from C++ before _exit, and via Module.onExit).
+// The wasm runtime is torn down and cannot restart in place, so reload the page:
+// gxBoot shows the start overlay with Play, and since the build is already in
+// OPFS the relaunch only re-fetches the cached engine wasm. Guarded so a double
+// call (C++ hook + onExit) reloads only once.
+let gxExiting = false;
+function gxOnEngineExit() {
+  if (gxExiting) return;
+  gxExiting = true;
+  try {
+    const ov = document.getElementById('gx-overlay');
+    if (ov) {
+      ov.style.display = 'flex';
+      const d = document.getElementById('gx-detail');
+      if (d) d.textContent = 'Возврат в меню…';
+    }
+  } catch {}
+  location.reload();
+}
+
 window.gxStartGame = gxStartGame;
 window.gxPreloadEngine = gxPreloadEngine;
+window.gxOnEngineExit = gxOnEngineExit;
