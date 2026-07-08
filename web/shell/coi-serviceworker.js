@@ -30,14 +30,28 @@ if (typeof window === 'undefined') {
 
   self.addEventListener('fetch', (e) => {
     const r = e.request;
-    if (r.cache === 'only-if-cached' && r.mode !== 'same-origin') return;
 
+    // Big binaries (the ~1.1 GB build.data archive and the ~78 MB wasm) must
+    // NOT be piped through the SW: re-wrapping their body streams every chunk
+    // through the service-worker thread, which blows past iOS Safari's tight SW
+    // memory/lifetime limits and gets the SW killed mid-download ("Service
+    // Worker context closed"). They are same-origin, so COEP: require-corp
+    // allows them by default (CORP defaults to same-origin) without any rewrite
+    // — fetch them straight from the network.
+    const path = (() => { try { return new URL(r.url).pathname; } catch { return ''; } })();
+    if (path.endsWith('.data') || path.endsWith('.wasm')) return;
+
+    // Everything else is small (HTML, JS, the unpack worker, JSON). Add the
+    // COOP/COEP/CORP headers so the document is crossOriginIsolated AND the
+    // dedicated worker script carries its own require-corp — a worker created
+    // in a require-corp context is blocked unless its script response has COEP.
     e.respondWith(
       fetch(r).then((res) => {
         if (res.status === 0) return res; // opaque
         const headers = new Headers(res.headers);
         headers.set('Cross-Origin-Embedder-Policy', 'require-corp');
         headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+        headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
         return new Response(res.body, {
           status: res.status,
           statusText: res.statusText,
@@ -72,6 +86,9 @@ if (typeof window === 'undefined') {
     navigator.serviceWorker.register(swUrl)
       .then((reg) => {
         console.log('[coi-sw] registered, scope:', reg.scope);
+        // Force an update check so a changed SW script is picked up promptly
+        // instead of the browser lazily keeping an old cached worker.
+        reg.update().catch(() => {});
         // ready resolves once a worker is ACTIVE (covers the first-install
         // race where updatefound fires before listeners attach).
         return navigator.serviceWorker.ready;

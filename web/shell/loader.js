@@ -54,8 +54,14 @@ function gxHuman(b) {
 // Returns { files, entries } (entries needed for IDB materialization).
 
 async function gxStreamExtract(url, storage) {
-  const worker = new Worker('unpack-worker.js');
-  const wasmUrl = new URL('brotli_bg.wasm', document.baseURI).href;
+  // The unpack worker is tiny (~9 KB) — always fetch fresh so a redeployed
+  // worker is never served stale from the browser's Worker script cache (which
+  // caused old builds to keep running with a since-fixed "offset out of bounds"
+  // path). brotli_bg.wasm (~1 MB, rarely changes) is versioned by buildId.
+  const ver = (window.gxEngine && window.gxEngine.buildId) || 'dev';
+  const bust = ver + '.' + (Date.now() >>> 0);
+  const worker = new Worker('unpack-worker.js?v=' + bust);
+  const wasmUrl = new URL('brotli_bg.wasm?v=' + ver, document.baseURI).href;
   let entries = null;
 
   const result = await new Promise((resolve, reject) => {
@@ -74,7 +80,18 @@ async function gxStreamExtract(url, storage) {
         reject(new Error(m.message));
       }
     });
-    worker.addEventListener('error', (e) => reject(new Error('Worker: ' + e.message)));
+    worker.addEventListener('error', (e) => {
+      // A worker load/parse error (e.g. failed importScripts, COEP block) fires
+      // here with an empty message — surface filename:line so it's diagnosable.
+      const where = e.filename ? (' @ ' + e.filename + ':' + e.lineno) : '';
+      const msg = e.message || 'не удалось загрузить unpack-worker.js';
+      console.error('[loader] worker error event:', e);
+      reject(new Error('Worker: ' + msg + where));
+    });
+    worker.addEventListener('messageerror', (e) => {
+      console.error('[loader] worker messageerror:', e);
+      reject(new Error('Worker: ошибка сериализации сообщения'));
+    });
     worker.postMessage({ type: 'start', url, wasmUrl, mode: storage.kind });
   });
 

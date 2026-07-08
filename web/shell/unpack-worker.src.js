@@ -64,7 +64,7 @@ function storagePath(path) {
   return path.startsWith('GameDataGenerals/') ? path : 'GameData/' + path;
 }
 
-// ── OPFS writer (sync access handles) ──────────────────────────────────────────
+// ── OPFS writer ─────────────────────────────────────────────────────────────
 let opfsRoot = null;
 const dirCache = new Map();
 async function opfsDir(parts, create) {
@@ -77,14 +77,15 @@ async function opfsDir(parts, create) {
   }
   return dir;
 }
-async function opfsWrite(path, data) {
+// Open a sync access handle for one file entry (truncated, ready at offset 0).
+async function opfsOpen(path) {
   const parts = storagePath(path).split('/').filter(Boolean);
   const name = parts.pop();
   const dir = await opfsDir(parts, true);
   const fh = await dir.getFileHandle(name, { create: true });
   const h = await fh.createSyncAccessHandle();
-  try { h.truncate(0); h.write(data, { at: 0 }); h.flush(); }
-  finally { h.close(); }
+  h.truncate(0);
+  return h;
 }
 
 // ── IndexedDB writer (fallback) ────────────────────────────────────────────────
@@ -101,19 +102,11 @@ function idbOpen() {
     r.onerror = () => reject(r.error);
   });
 }
-function idbWrite(path, data) {
-  return new Promise((resolve, reject) => {
-    const tx = idb.transaction('files', 'readwrite');
-    tx.objectStore('files').put(new Blob([data]), path);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
 
 // ── Streaming state ─────────────────────────────────────────────────────────────
 let mode = 'opfs';
 let CODE_MORE_OUTPUT;
-const OUT_CHUNK = 8 * 1024 * 1024;
+const OUT_CHUNK = 1 * 1024 * 1024;
 
 let entries = null;
 let segments = null;
@@ -121,10 +114,95 @@ let ds = null;            // current segment's DecompressStream
 let segIdx = 0;
 let segRemaining = 0;     // compressed bytes left in the current segment
 
+// The decompressed stream is a contiguous concatenation of the files in `entries`
+// order. We walk a single cursor through it; each decompressed chunk is routed
+// into whichever file(s) it covers. Peak RAM is one output chunk (~8 MB), not a
+// whole file — critical for iOS where a 318 MB Textures.big would otherwise sit
+// in memory until fully decompressed.
+let decPos = 0;           // absolute position reached in the decompressed stream
+let curIdx = 0;           // index of the file the cursor is inside
+let curHandle = null;     // open OPFS sync access handle for entries[curIdx]
+let curWritten = 0;       // bytes written into entries[curIdx] so far
+
+// IDB fallback keeps the accumulator (partial writes are awkward there).
 let accChunks = [];
 let accBase = 0, accSize = 0;
-let scheduledIdx = 0, writtenIdx = 0;
+let scheduledIdx = 0;
+let writtenIdx = 0;       // files completed (progress)
 
+// ── OPFS streaming route ────────────────────────────────────────────────────
+// Write a decompressed chunk directly into the current file's handle, opening
+// the next file (and closing the finished one) as the cursor crosses boundaries.
+async function routeOpfs(chunk) {
+  let off = 0;
+  while (off < chunk.length) {
+    // Ensure the current file is open, skipping any zero-byte entries.
+    while (curHandle === null) {
+      if (curIdx >= entries.length) return;        // beyond last file (shouldn't happen)
+      const e = entries[curIdx];
+      curHandle = await opfsOpen(e.path);
+      curWritten = 0;
+      if (e.size === 0) { await finishCurrent(); }  // empty file: close immediately
+    }
+    const e = entries[curIdx];
+    const remain = e.size - curWritten;
+    const take = Math.min(remain, chunk.length - off);
+    // FileSystemSyncAccessHandle.write() may write FEWER bytes than requested
+    // (large writes, quota pressure). Loop on the return value so the file is
+    // never left with a garbage tail — a short write into a .big archive
+    // silently corrupts it and hangs the engine's INI parser later.
+    let w = 0;
+    while (w < take) {
+      let wrote;
+      try {
+        wrote = curHandle.write(chunk.subarray(off + w, off + take), { at: curWritten + w });
+      } catch (err) {
+        throw new Error('Запись ' + e.path + ' @' + (curWritten + w) + '/' + e.size +
+          ': ' + (err && err.message ? err.message : err));
+      }
+      if (!(wrote > 0))
+        throw new Error('Запись ' + e.path + ': нулевая запись @' + (curWritten + w) + '/' + e.size);
+      w += wrote;
+    }
+    curWritten += take;
+    off += take;
+    decPos += take;
+    if (curWritten >= e.size) await finishCurrent();
+  }
+}
+async function finishCurrent() {
+  if (curHandle) { curHandle.flush(); curHandle.close(); curHandle = null; }
+  curIdx++;
+  writtenIdx++;
+  if (writtenIdx % 2 === 0 || writtenIdx === entries.length)
+    postMessage({ type: 'progress', done: writtenIdx, total: entries.length });
+}
+// Handle trailing zero-byte files after the stream ends.
+async function finishTrailingEmpties() {
+  while (curIdx < entries.length && entries[curIdx].size === 0) {
+    curHandle = await opfsOpen(entries[curIdx].path);
+    await finishCurrent();
+  }
+}
+// Re-open every file and check its on-disk size against the index. Catches any
+// truncated/short write before the engine boots on a corrupt .big (which hangs
+// its INI parser). Only for OPFS (the streamed path).
+async function verifyOpfsSizes() {
+  for (const e of entries) {
+    const parts = storagePath(e.path).split('/').filter(Boolean);
+    const name = parts.pop();
+    const dir = await opfsDir(parts, false);
+    const fh = await dir.getFileHandle(name);
+    const h = await fh.createSyncAccessHandle();
+    const sz = h.getSize();
+    h.close();
+    if (sz !== e.size)
+      throw new Error('Проверка не пройдена: ' + e.path + ' на диске ' + sz +
+        ' байт, ожидалось ' + e.size + ' — повторите загрузку.');
+  }
+}
+
+// ── IDB accumulator route (fallback) ────────────────────────────────────────
 function accAppend(chunk) { if (chunk.byteLength) { accChunks.push(chunk); accSize += chunk.byteLength; } }
 function accRead(offset, size) {
   const out = new Uint8Array(size);
@@ -152,17 +230,30 @@ function accTrim(absUpTo) {
     accBase += drop; accSize -= drop;
   }
 }
-
-async function drainAndWrite() {
+function idbWrite(path, data) {
+  return new Promise((resolve, reject) => {
+    const tx = idb.transaction('files', 'readwrite');
+    tx.objectStore('files').put(new Blob([data]), path);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function drainIdb() {
   while (scheduledIdx < entries.length) {
     const e = entries[scheduledIdx];
     if (accBase + accSize < e.offset + e.size) break;
     const data = accRead(e.offset, e.size);
-    await (mode === 'opfs' ? opfsWrite : idbWrite)(e.path, data);
+    await idbWrite(e.path, data);
     scheduledIdx++;
     writtenIdx++;
     postMessage({ type: 'progress', done: writtenIdx, total: entries.length });
   }
+}
+
+// One decompressed chunk → storage (streamed for OPFS, accumulated for IDB).
+async function onDecompressed(chunk) {
+  if (mode === 'opfs') await routeOpfs(chunk);
+  else { accAppend(chunk); await drainIdb(); }
 }
 
 function startSegment() {
@@ -181,15 +272,30 @@ async function feed(input) {
     let sOff = 0;
     for (;;) {
       const res = ds.decompress(slice.subarray(sOff), OUT_CHUNK);
-      if (res.buf.length) accAppend(res.buf);
-      sOff += res.input_offset;
-      await drainAndWrite();
-      if (res.code === CODE_MORE_OUTPUT) continue;   // buffered output — keep pulling
+      // Capture fields, then free the wasm-side result immediately. brotli-wasm
+      // shares one wasm instance across all segments; leaking DecompressStream
+      // and BrotliStreamResult objects grows its heap monotonically until it
+      // dies near ~2 GB of cumulative output (segment ~31/33) with a spurious
+      // "offset is out of bounds". Freeing keeps the heap bounded.
+      // NOTE: the `buf` getter slices AND frees the wasm buffer, so read it once.
+      const out = res.buf;
+      const code = res.code;
+      const inc = res.input_offset;
+      if (out.length) await onDecompressed(out);
+      if (res.free) res.free();
+      sOff += inc;
+      if (code === CODE_MORE_OUTPUT) {
+        if (out.length === 0 && inc === 0)
+          throw new Error('Декомпрессия застряла в сегменте ' + segIdx + ' (no progress)');
+        continue;   // buffered output — keep pulling
+      }
       break;                                          // MORE_INPUT or SUCCESS — slice done
     }
     inOff += avail;
     segRemaining -= avail;
     if (segRemaining === 0) {                         // segment fully consumed
+      if (ds && ds.free) ds.free();                   // release the decoder state
+      ds = null;
       segIdx++;
       if (segIdx < segments.length) startSegment();
     }
@@ -263,6 +369,24 @@ async function run(url) {
   })();
 
   await Promise.all([producer, consumer]);
+  // Flush any trailing zero-byte files (OPFS) — non-empty ones are already
+  // written as the cursor crossed their boundaries. (IDB drains inline.)
+  if (mode === 'opfs') await finishTrailingEmpties();
+
+  // Integrity guard: every file must be fully written. If the stream ended
+  // early (truncated download, decompress abort) some files are missing or
+  // half-written — fail loudly so the loader does NOT mark the build installed
+  // and boot the engine on corrupt data (which hangs it in loadFileDirectory).
+  if (curHandle) { try { curHandle.flush(); curHandle.close(); } catch {} curHandle = null; }
+  if (writtenIdx !== entries.length) {
+    throw new Error('Распаковка неполная: записано ' + writtenIdx + ' из ' +
+      entries.length + ' файлов (оборванная загрузка). Повторите.');
+  }
+  // Verify every file's on-disk size matches the index before declaring success.
+  if (mode === 'opfs') {
+    postMessage({ type: 'progress', done: entries.length, total: entries.length, verifying: true });
+    await verifyOpfsSizes();
+  }
   postMessage({ type: 'complete', files: writtenIdx, entries });
 }
 
