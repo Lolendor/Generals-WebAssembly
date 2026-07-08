@@ -146,6 +146,11 @@ class GxMqttClient {
       if (buf[3] === 0) {
         this._connected = true;
         this._startPing();
+        // Re-establish every subscription on this (possibly new) connection.
+        // Without this, a broker failover reconnects us deaf: SUBSCRIBE was
+        // only ever sent on the original socket, so signaling goes silent and
+        // peer (re)connects become impossible.
+        for (const topic of this._subCallbacks.keys()) this._sendSubscribe(topic);
         this._flush();
         if (res) res(this);
         res = null;
@@ -187,13 +192,16 @@ class GxMqttClient {
     return pp.length === tp.length;
   }
 
-  subscribe(topic, cb) {
-    this._subCallbacks.set(topic, cb);
+  _sendSubscribe(topic) {
     const t = gxEnc(topic);
     const p = new Uint8Array([0, ((Math.random() * 255) | 0) + 1, ...gxU16(t.length), ...t, 0]);
-    const pkt = new Uint8Array([0x82, ...gxVarLen(p.length), ...p]);
-    if (this._connected) this._send(pkt);
-    else this._queue.push(pkt);
+    this._send(new Uint8Array([0x82, ...gxVarLen(p.length), ...p]));
+  }
+
+  subscribe(topic, cb) {
+    this._subCallbacks.set(topic, cb);
+    if (this._connected) this._sendSubscribe(topic);
+    // else: sent on CONNACK by the resubscribe loop in _handlePacket.
   }
 
   publish(topic, data) {
@@ -266,13 +274,26 @@ class GxSignaling {
 // One WebRTC peer connection with a DataChannel
 // ---------------------------------------------------------------------------
 
+// Keepalive frame: 8 bytes [magic 'GXKA'|u8 kind|u24 seq-ish time bits].
+// Sent inside the same DataChannel; receivers recognize it by the magic and
+// never hand it to the game. kind: 0 = ping, 1 = pong (echoes the timestamp).
+const GX_KA_MAGIC = 0x474b4158; // 'GXKA' little-endian-ish tag
+const GX_KA_INTERVAL_MS = 2000;
+const GX_KA_DEAD_MISSES = 3;
+// Send-side buffer cap: if SCTP is backed up past this, drop like UDP would.
+const GX_MAX_BUFFERED = 512 * 1024;
+// Reconnect queue cap: keep only the freshest frames while a channel re-opens.
+const GX_MAX_QUEUE = 64;
+
 class GxRtcPeer {
   /**
    * @param sig       GxSignaling
    * @param remoteId  peer id on the other side
    * @param initiator true = we create the DataChannel + offer
    * @param opts      DataChannel options; game traffic uses
-   *                  {ordered:false, maxRetransmits:0} (UDP semantics)
+   *                  {ordered:false, maxPacketLifeTime:150} — bounded-latency
+   *                  partial reliability: SCTP retransmits within 150 ms, then
+   *                  gives up. Near-UDP latency, an order less effective loss.
    */
   constructor(sig, remoteId, initiator, opts) {
     this.sig = sig;
@@ -285,7 +306,15 @@ class GxRtcPeer {
     this._q = [];
     this.onOpen = null;
     this.onClose = null;
-    this.onMsg = null; // (dataOrObj) - binary frames arrive as ArrayBuffer
+    this.onMsg = null;  // (dataOrObj) - binary frames arrive as ArrayBuffer
+    this.onDead = null; // keepalive misses / ICE failed — candidate for reconnect
+    this.onRtt = null;  // (ms) smoothed RTT updates
+    // stats
+    this.rttMs = -1;
+    this.dropsQueue = 0;    // frames dropped by queue/buffer caps
+    this._kaTimer = null;
+    this._kaMisses = 0;
+    this._kaAwait = 0;      // timestamp of the ping we're waiting on (0 = none)
   }
 
   async start() {
@@ -295,7 +324,9 @@ class GxRtcPeer {
     };
     this.pc.onconnectionstatechange = () => {
       const s = this.pc.connectionState;
-      if (['failed', 'disconnected', 'closed'].includes(s)) this.onClose && this.onClose();
+      if (s === 'failed') this._reportDead('ice failed');
+      else if (s === 'closed') this.onClose && this.onClose();
+      // 'disconnected' is transient — keepalive decides if it's real.
     };
     if (this.initiator) {
       this.dc = this.pc.createDataChannel('gx', this.dcOpts);
@@ -311,25 +342,101 @@ class GxRtcPeer {
     }
   }
 
+  // ICE restart: renegotiate candidate pairs on the SAME connection — survives
+  // a network/IP change without tearing down the DataChannel. Initiator only.
+  async restartIce() {
+    if (!this.pc || !this.initiator) return false;
+    try {
+      this.pc.restartIce();
+      const o = await this.pc.createOffer({ iceRestart: true });
+      await this.pc.setLocalDescription(o);
+      this.sig.sendTo(this.rid, { t: 'offer', sdp: o });
+      return true;
+    } catch (e) {
+      console.warn('[rtc] restartIce:', e);
+      return false;
+    }
+  }
+
   _bindDC(dc) {
     dc.binaryType = 'arraybuffer';
     dc.onopen = () => {
       this._open = true;
+      this._kaMisses = 0;
+      this._startKeepalive();
       this._flush();
       this.onOpen && this.onOpen();
     };
     dc.onclose = () => {
       this._open = false;
+      this._stopKeepalive();
       this.onClose && this.onClose();
     };
     dc.onmessage = (e) => {
-      if (!this.onMsg) return;
       if (typeof e.data === 'string') {
+        if (!this.onMsg) return;
         try { this.onMsg(JSON.parse(e.data)); } catch {}
-      } else {
-        this.onMsg(e.data);
+        return;
       }
+      // Binary: intercept keepalive frames, pass everything else to the game.
+      if (e.data.byteLength === 12) {
+        const dv = new DataView(e.data);
+        if (dv.getUint32(0, true) === GX_KA_MAGIC) {
+          const kind = dv.getUint32(4, true);
+          const ts = dv.getFloat32(8, true);
+          if (kind === 0) {                       // ping → answer with pong
+            this._sendKA(1, ts);
+          } else {                                // pong → RTT sample
+            this._kaMisses = 0;
+            this._kaAwait = 0;
+            const rtt = (performance.now() % 8388608) - ts;
+            const sample = rtt >= 0 ? rtt : rtt + 8388608;
+            this.rttMs = this.rttMs < 0 ? sample : this.rttMs * 0.7 + sample * 0.3;
+            this.onRtt && this.onRtt(this.rttMs);
+          }
+          return;
+        }
+      }
+      this.onMsg && this.onMsg(e.data);
     };
+  }
+
+  _sendKA(kind, ts) {
+    if (!this._open || !this.dc || this.dc.readyState !== 'open') return;
+    const buf = new ArrayBuffer(12);
+    const dv = new DataView(buf);
+    dv.setUint32(0, GX_KA_MAGIC, true);
+    dv.setUint32(4, kind, true);
+    dv.setFloat32(8, ts, true);
+    try { this.dc.send(buf); } catch {}
+  }
+
+  _startKeepalive() {
+    this._stopKeepalive();
+    this._kaTimer = setInterval(() => {
+      if (!this._open) return;
+      if (this._kaAwait) {
+        this._kaMisses++;
+        if (this._kaMisses >= GX_KA_DEAD_MISSES) {
+          this._stopKeepalive();
+          this._reportDead('keepalive: ' + this._kaMisses + ' misses');
+          return;
+        }
+      }
+      this._kaAwait = performance.now() % 8388608;
+      this._sendKA(0, this._kaAwait);
+    }, GX_KA_INTERVAL_MS);
+  }
+
+  _stopKeepalive() {
+    if (this._kaTimer) { clearInterval(this._kaTimer); this._kaTimer = null; }
+    this._kaAwait = 0;
+  }
+
+  _reportDead(why) {
+    console.warn('[rtc] peer dead (' + why + '):', this.rid);
+    if (this.onDead) this.onDead(why);
+    else this.onClose && this.onClose();
   }
 
   async signal(msg) {
@@ -354,8 +461,19 @@ class GxRtcPeer {
     // Binary passthrough for the game's datagram bridge; JSON for control.
     const payload = data instanceof ArrayBuffer || ArrayBuffer.isView(data)
       ? data : JSON.stringify(data);
-    if (this._open && this.dc && this.dc.readyState === 'open') this.dc.send(payload);
-    else this._q.push(payload);
+    if (this._open && this.dc && this.dc.readyState === 'open') {
+      // UDP semantics under congestion: if SCTP's send buffer is backed up,
+      // drop instead of queueing latency (the game's own resends recover).
+      if (typeof payload !== 'string' && this.dc.bufferedAmount > GX_MAX_BUFFERED) {
+        this.dropsQueue++;
+        return;
+      }
+      try { this.dc.send(payload); } catch { this.dropsQueue++; }
+      return;
+    }
+    // Channel down (opening/reconnecting): keep only the freshest frames.
+    this._q.push(payload);
+    if (this._q.length > GX_MAX_QUEUE) { this._q.shift(); this.dropsQueue++; }
   }
 
   _flush() {
@@ -363,6 +481,8 @@ class GxRtcPeer {
   }
 
   destroy() {
+    this._stopKeepalive();
+    this.onDead = null;
     try { this.dc && this.dc.close(); } catch {}
     try { this.pc && this.pc.close(); } catch {}
   }

@@ -29,6 +29,11 @@
 const GX_BROADCAST = 0xffffffff >>> 0;
 const GX_VNET_BASE = (10 << 24) | (77 << 16); // 10.77.0.0
 const GX_HDR = 12;
+// Per-socket inbound queue cap. If the game thread stalls (hidden tab, long
+// load) we drop the OLDEST datagrams — stale RTS commands are worthless and
+// real UDP would have dropped them too; unbounded queues just eat memory and
+// then burst-deliver garbage.
+const GX_MAX_SOCK_QUEUE = 256;
 
 class GxNet {
   constructor() {
@@ -40,6 +45,7 @@ class GxNet {
     this.isHost = false;
     this.meshEpoch = 0;            // bumps on peer connect/disconnect; the engine
                                    // polls this to force an instant LAN re-announce
+    this.dropsInbound = 0;         // datagrams dropped by the socket queue cap
   }
 
   // ── C++-facing API (called via MAIN_THREAD_EM_ASM) ──────────────────────────
@@ -125,7 +131,12 @@ class GxNet {
     const handle = this.portToHandle.get(dstPort);
     if (handle === undefined) return;            // no socket bound to that port
     const s = this.sockets.get(handle);
-    if (s) s.queue.push({ ip: srcIP, port: srcPort, bytes: payload });
+    if (!s) return;
+    s.queue.push({ ip: srcIP, port: srcPort, bytes: payload });
+    if (s.queue.length > GX_MAX_SOCK_QUEUE) {    // drop-oldest (UDP semantics)
+      s.queue.shift();
+      this.dropsInbound++;
+    }
   }
 
   _frame(srcIP, srcPort, dstIP, dstPort, payload) {
