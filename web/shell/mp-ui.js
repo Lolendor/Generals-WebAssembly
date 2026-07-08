@@ -41,6 +41,14 @@ window.addEventListener('DOMContentLoaded', () => {
   gxLobby.onPeers = (n) => {
     peersEl.textContent = n > 0 ? ('Подключено игроков: ' + n) : '';
   };
+  // Per-peer link quality: RTT + drop counter, refreshed every 2 s.
+  gxLobby.onQuality = (list) => {
+    if (!list.length) { peersEl.textContent = ''; return; }
+    peersEl.innerHTML = list.map((q) =>
+      q.vip + ' — ' + (q.open ? (q.rtt >= 0 ? q.rtt + 'мс' : '…') : 'реконнект') +
+      (q.drops > 0 ? ' (потери ' + q.drops + ')' : '')
+    ).join('<br>');
+  };
 
   toggle.addEventListener('click', () => { panel.hidden = !panel.hidden; });
 

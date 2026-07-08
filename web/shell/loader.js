@@ -175,6 +175,71 @@ async function gxMaterializeIdb(storage) {
   };
 }
 
+// Wipe every browser-side store this app uses: OPFS (game files, meta,
+// userdata), IndexedDB (gx-assets fallback + any others on the origin),
+// Cache Storage, localStorage/sessionStorage settings, and the COI service
+// worker registration. Used by the settings "Очистить все данные" button.
+async function gxWipeAllStorage() {
+  const jobs = [];
+
+  // OPFS: remove every top-level entry.
+  if (navigator.storage && navigator.storage.getDirectory) {
+    jobs.push((async () => {
+      try {
+        const root = await navigator.storage.getDirectory();
+        const names = [];
+        for await (const [name] of root.entries()) names.push(name);
+        for (const name of names) {
+          await root.removeEntry(name, { recursive: true }).catch(() => {});
+        }
+      } catch (e) { console.warn('[wipe] OPFS:', e); }
+    })());
+  }
+
+  // IndexedDB: delete every database on the origin (or at least ours).
+  jobs.push((async () => {
+    try {
+      let names = ['gx-assets'];
+      if (indexedDB.databases) {
+        try {
+          const dbs = await indexedDB.databases();
+          names = dbs.map((d) => d.name).filter(Boolean);
+        } catch {}
+      }
+      await Promise.all(names.map((n) => new Promise((res) => {
+        const req = indexedDB.deleteDatabase(n);
+        req.onsuccess = req.onerror = req.onblocked = () => res();
+      })));
+    } catch (e) { console.warn('[wipe] IDB:', e); }
+  })());
+
+  // Cache Storage (anything a SW or the browser cached under our origin).
+  if (window.caches && caches.keys) {
+    jobs.push((async () => {
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      } catch (e) { console.warn('[wipe] caches:', e); }
+    })());
+  }
+
+  // Service workers (the COI worker re-registers itself on next load).
+  if ('serviceWorker' in navigator) {
+    jobs.push((async () => {
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      } catch (e) { console.warn('[wipe] sw:', e); }
+    })());
+  }
+
+  await Promise.all(jobs);
+
+  // Settings and per-tab identity last (sync, can't fail meaningfully).
+  try { localStorage.clear(); } catch {}
+  try { sessionStorage.clear(); } catch {}
+}
+
 async function gxLoadNetConfig() {
   try {
     const r = await fetch('ice.json', { cache: 'no-cache' });
@@ -225,6 +290,31 @@ async function gxBoot() {
 
     settingsBtn.style.display = 'inline-block';
     settingsBtn.addEventListener('click', () => { settingsBox.hidden = !settingsBox.hidden; });
+
+    // Wipe-everything button: OPFS, IndexedDB, Cache Storage, local/session
+    // storage, and the COI service worker. Two clicks to confirm.
+    const wipeBtn = document.getElementById('gx-wipe');
+    let wipeArmed = false;
+    wipeBtn.addEventListener('click', async () => {
+      if (!wipeArmed) {
+        wipeArmed = true;
+        wipeBtn.textContent = 'Точно удалить всё? (клик = да)';
+        setTimeout(() => { wipeArmed = false; wipeBtn.textContent = 'Очистить все данные'; }, 4000);
+        return;
+      }
+      wipeBtn.disabled = true;
+      wipeBtn.textContent = 'Очистка…';
+      try {
+        await gxWipeAllStorage();
+        wipeBtn.textContent = 'Готово — перезагрузка…';
+        setTimeout(() => location.reload(), 600);
+      } catch (e) {
+        console.error('[loader] wipe failed:', e);
+        wipeBtn.disabled = false;
+        wipeBtn.textContent = 'Ошибка очистки — ещё раз?';
+        wipeArmed = false;
+      }
+    });
 
     await new Promise((resolve) => btn.addEventListener('click', resolve, { once: true }));
     btn.style.display = 'none';
