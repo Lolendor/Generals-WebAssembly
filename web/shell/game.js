@@ -59,10 +59,55 @@ function gxGameArguments() {
   return args;
 }
 
+// Keep game hotkeys away from the browser. Generals uses Ctrl+1..9 (assign
+// control group), plain 1..9 (select group), Alt+combos, F-keys, Tab, Space.
+// The browser's defaults (Ctrl/Cmd+digit = switch tab, Ctrl+S/P/F/D/O/U, quick
+// find on '/', backspace-navigation, ...) would fire on top of the game.
+// A capture-phase listener on window runs BEFORE the browser default AND does
+// not stop the event from reaching SDL's canvas handler (preventDefault only
+// cancels the default action, not propagation).
+// NOTE: Ctrl/Cmd+W, +T, +N and Cmd+Q are reserved by the browser and cannot be
+// intercepted from a page; everything else below works.
+function gxInstallKeyGuard() {
+  if (window.gxKeyGuard) return;
+  window.gxKeyGuard = (e) => {
+    // Don't interfere while a shell DOM input has focus (e.g. the multiplayer
+    // room-code field needs Ctrl+V / normal editing).
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+    const k = e.key;
+    const mod = e.ctrlKey || e.metaKey;
+
+    // Ctrl/Cmd + digit (tab switching) — the control-group keys.
+    if (mod && k >= '0' && k <= '9') { e.preventDefault(); return; }
+
+    // Browser single-key/page shortcuts that break RTS input.
+    if (!mod && (k === 'Tab' || k === '/' || k === "'" || k === 'F1' || k === 'F3' ||
+                 k === 'F5' || k === 'F6' || k === 'F7' || k === 'F10' || k === 'F11' || k === 'F12')) {
+      e.preventDefault(); return;
+    }
+
+    // Backspace navigating back when the canvas has focus.
+    if (!mod && k === 'Backspace') { e.preventDefault(); return; }
+
+    // Ctrl/Cmd + letter shortcuts (save page, print, find, bookmark, view
+    // source, history, downloads, address bar, ...). The game handles its own
+    // Ctrl+letter combos; W/T/N are browser-reserved and unreachable anyway.
+    if (mod && k.length === 1 && ((k >= 'a' && k <= 'z') || (k >= 'A' && k <= 'Z'))) {
+      e.preventDefault(); return;
+    }
+  };
+  window.addEventListener('keydown', window.gxKeyGuard, { capture: true });
+}
+
 async function gxStartGame() {
   // Engine wasm was pre-downloaded by gxPreloadEngine() into window.gxEngine.
   const buildId = window.gxEngine.buildId || 'dev';
   const wasmBinary = window.gxEngine.wasmBinary;
+
+  // Arm the hotkey guard for the whole game session.
+  gxInstallKeyGuard();
 
   return new Promise((resolve, reject) => {
     const canvas = document.getElementById('canvas');
