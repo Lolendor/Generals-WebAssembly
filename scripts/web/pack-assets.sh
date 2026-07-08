@@ -73,8 +73,10 @@ if [ ! -f "$FONTS_DIR/arial.ttf" ]; then
     echo "WARNING: no fonts staged — game text will not render" >&2
 fi
 
-# Pack into single .data file
+# Pack into single .data file (+ build.data.meta.json for resumable downloads).
+# Segment cache lives outside dist so it is never uploaded to a host.
 echo "==> Packing…"
+GX_PACK_CACHE="$REPO_ROOT/web/.pack-cache" \
 /opt/homebrew/bin/python3.11 "$REPO_ROOT/scripts/web/packer.py" "$WORK/files" "$OUTDIR/build.data"
 
 echo "==> Done: $OUTDIR/build.data"

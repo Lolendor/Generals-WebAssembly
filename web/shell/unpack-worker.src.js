@@ -1,21 +1,45 @@
-// GeneralsX Web - unpack worker (segmented brotli, format v2).
+// GeneralsX Web - unpack dispatcher (segmented brotli, format v2).
 //
-// Fetches build.data itself and runs the whole pipeline on its own thread:
-//   fetch → parse index + segment table → per-segment brotli decompress
-//   → concat decompressed output → slice files → write OPFS / IndexedDB.
+// Pipeline (this worker orchestrates, never decompresses):
+//   network reader ──slice at segment boundaries──▶ pool of brotli sub-workers
+//        │  (compressed segments, transferable)         │ (parallel decompress)
+//        ▼                                              ▼ (decompressed, transferable)
+//   retry w/ Range on drop                    in-order writer → OPFS sync handles
+//                                                        │
+//                                             journal per completed segment → loader
 //
-// The blob is split into independent brotli segments (packer.py compresses them
-// in parallel across cores). Here they decompress sequentially, each with its
-// own DecompressStream; concatenating every segment's output rebuilds the blob,
-// from which files are sliced by absolute offset/size (unchanged from v1).
+// Design notes:
+// - Segments are independent brotli streams (packer.py v2), so they
+//   decompress in parallel and are the unit of resume.
+// - The writer consumes decompressed segments strictly in order (files span
+//   segment boundaries); out-of-order results are parked until their turn.
+//   OPFS writes are much faster than decompression, so a single writer is
+//   never the bottleneck.
+// - Back-pressure: at most POOL+2 segments in flight (dispatched or parked),
+//   keeping peak memory bounded (~(POOL+2) × segment size).
+// - Byte-exact input accounting lives in the pool worker (whole segments in,
+//   whole buffers out) — the old streaming feed() lost unconsumed tail bytes
+//   on NeedsMoreInput and wedged the stream. There is no such path anymore.
+// - Resume: the loader passes {startSeg, journal etag/total}; we Range-fetch
+//   from that segment's absolute compressed offset, never truncate existing
+//   files, and overwrite the incomplete segment's byte range idempotently.
 //
-// Format v2:
-//   u32 'GAXD' | u32 version=2 | uleb file_count | [uleb plen,path,uleb off,uleb size]*
-//   | uleb seg_count | [uleb usize, uleb csize]* | <seg0 brotli><seg1 brotli>...
+// Protocol (loader → dispatcher):
+//   {type:'start', url, wasmUrl, mode, resume?:{startSeg,total,headerBuf?}}
+// Protocol (dispatcher → loader):
+//   {type:'download', received, total}          absolute compressed progress
+//   {type:'index', entries}
+//   {type:'progress', done, total}              files fully written
+//   {type:'journal', seg, etag, total}          segment completed+flushed
+//   {type:'reconnect', attempt, waitMs}         network drop, retrying
+//   {type:'complete', files, entries}
+//   {type:'error', message}
 //
-// GeneralsX @build web-port 07/07/2026
+// GeneralsX @build web-port packer-v2 09/07/2026
 
-import init, * as brotli from './node_modules/brotli-wasm/pkg.web/brotli_wasm.js';
+'use strict';
+
+// ── small utils ───────────────────────────────────────────────────────────────
 
 function readUleb(buf, off) {
   let val = 0, mul = 1;
@@ -28,8 +52,35 @@ function readUleb(buf, off) {
   return [val, off];
 }
 
-// Parse the full v2 header (file index + segment table). Returns null if the
-// buffer does not yet hold the whole header, else {entries, segments, indexEnd}.
+// Condition gate without lost-wakeup races. Supports MULTIPLE concurrent
+// waiters (the net task and the writer both wait on the pool gate): wake()
+// releases every current waiter; a wake() with no waiters is remembered
+// (pending) and consumed by the next wait(). Callers re-check their condition
+// in a while loop after every wait, so spurious wakeups are harmless.
+class Gate {
+  constructor() { this._waiters = []; this._pending = false; }
+  wake() {
+    if (this._waiters.length) {
+      const ws = this._waiters; this._waiters = [];
+      for (const r of ws) r();
+    } else {
+      this._pending = true;
+    }
+  }
+  wait() {
+    if (this._pending) { this._pending = false; return Promise.resolve(); }
+    return new Promise((r) => { this._waiters.push(r); });
+  }
+}
+
+function concat(chunks, total) {
+  const out = new Uint8Array(total);
+  let p = 0;
+  for (const c of chunks) { out.set(c, p); p += c.byteLength; }
+  return out;
+}
+
+// Parse the full v2 header. Returns null if buf doesn't yet hold all of it.
 function tryParseIndex(buf) {
   if (buf.length < 8) return null;
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -64,7 +115,8 @@ function storagePath(path) {
   return path.startsWith('GameDataGenerals/') ? path : 'GameData/' + path;
 }
 
-// ── OPFS writer ─────────────────────────────────────────────────────────────
+// ── OPFS writer ───────────────────────────────────────────────────────────────
+
 let opfsRoot = null;
 const dirCache = new Map();
 async function opfsDir(parts, create) {
@@ -77,18 +129,30 @@ async function opfsDir(parts, create) {
   }
   return dir;
 }
-// Open a sync access handle for one file entry (truncated, ready at offset 0).
-async function opfsOpen(path) {
+// Open a sync access handle. Truncates only when asked (fresh install), so
+// resume never clobbers already-written earlier parts of a spanning file.
+async function opfsOpen(path, truncate) {
   const parts = storagePath(path).split('/').filter(Boolean);
   const name = parts.pop();
   const dir = await opfsDir(parts, true);
   const fh = await dir.getFileHandle(name, { create: true });
   const h = await fh.createSyncAccessHandle();
-  h.truncate(0);
+  if (truncate) h.truncate(0);
   return h;
 }
+async function opfsGetSize(path) {
+  const parts = storagePath(path).split('/').filter(Boolean);
+  const name = parts.pop();
+  const dir = await opfsDir(parts, false);
+  const fh = await dir.getFileHandle(name);
+  const h = await fh.createSyncAccessHandle();
+  const sz = h.getSize();
+  h.close();
+  return sz;
+}
 
-// ── IndexedDB writer (fallback) ────────────────────────────────────────────────
+// ── IndexedDB writer (fallback; no resume in this mode) ───────────────────────
+
 let idb = null;
 function idbOpen() {
   return new Promise((resolve, reject) => {
@@ -102,134 +166,6 @@ function idbOpen() {
     r.onerror = () => reject(r.error);
   });
 }
-
-// ── Streaming state ─────────────────────────────────────────────────────────────
-let mode = 'opfs';
-let CODE_MORE_OUTPUT;
-const OUT_CHUNK = 1 * 1024 * 1024;
-
-let entries = null;
-let segments = null;
-let ds = null;            // current segment's DecompressStream
-let segIdx = 0;
-let segRemaining = 0;     // compressed bytes left in the current segment
-
-// The decompressed stream is a contiguous concatenation of the files in `entries`
-// order. We walk a single cursor through it; each decompressed chunk is routed
-// into whichever file(s) it covers. Peak RAM is one output chunk (~8 MB), not a
-// whole file — critical for iOS where a 318 MB Textures.big would otherwise sit
-// in memory until fully decompressed.
-let decPos = 0;           // absolute position reached in the decompressed stream
-let curIdx = 0;           // index of the file the cursor is inside
-let curHandle = null;     // open OPFS sync access handle for entries[curIdx]
-let curWritten = 0;       // bytes written into entries[curIdx] so far
-
-// IDB fallback keeps the accumulator (partial writes are awkward there).
-let accChunks = [];
-let accBase = 0, accSize = 0;
-let scheduledIdx = 0;
-let writtenIdx = 0;       // files completed (progress)
-
-// ── OPFS streaming route ────────────────────────────────────────────────────
-// Write a decompressed chunk directly into the current file's handle, opening
-// the next file (and closing the finished one) as the cursor crosses boundaries.
-async function routeOpfs(chunk) {
-  let off = 0;
-  while (off < chunk.length) {
-    // Ensure the current file is open, skipping any zero-byte entries.
-    while (curHandle === null) {
-      if (curIdx >= entries.length) return;        // beyond last file (shouldn't happen)
-      const e = entries[curIdx];
-      curHandle = await opfsOpen(e.path);
-      curWritten = 0;
-      if (e.size === 0) { await finishCurrent(); }  // empty file: close immediately
-    }
-    const e = entries[curIdx];
-    const remain = e.size - curWritten;
-    const take = Math.min(remain, chunk.length - off);
-    // FileSystemSyncAccessHandle.write() may write FEWER bytes than requested
-    // (large writes, quota pressure). Loop on the return value so the file is
-    // never left with a garbage tail — a short write into a .big archive
-    // silently corrupts it and hangs the engine's INI parser later.
-    let w = 0;
-    while (w < take) {
-      let wrote;
-      try {
-        wrote = curHandle.write(chunk.subarray(off + w, off + take), { at: curWritten + w });
-      } catch (err) {
-        throw new Error('Запись ' + e.path + ' @' + (curWritten + w) + '/' + e.size +
-          ': ' + (err && err.message ? err.message : err));
-      }
-      if (!(wrote > 0))
-        throw new Error('Запись ' + e.path + ': нулевая запись @' + (curWritten + w) + '/' + e.size);
-      w += wrote;
-    }
-    curWritten += take;
-    off += take;
-    decPos += take;
-    if (curWritten >= e.size) await finishCurrent();
-  }
-}
-async function finishCurrent() {
-  if (curHandle) { curHandle.flush(); curHandle.close(); curHandle = null; }
-  curIdx++;
-  writtenIdx++;
-  if (writtenIdx % 2 === 0 || writtenIdx === entries.length)
-    postMessage({ type: 'progress', done: writtenIdx, total: entries.length });
-}
-// Handle trailing zero-byte files after the stream ends.
-async function finishTrailingEmpties() {
-  while (curIdx < entries.length && entries[curIdx].size === 0) {
-    curHandle = await opfsOpen(entries[curIdx].path);
-    await finishCurrent();
-  }
-}
-// Re-open every file and check its on-disk size against the index. Catches any
-// truncated/short write before the engine boots on a corrupt .big (which hangs
-// its INI parser). Only for OPFS (the streamed path).
-async function verifyOpfsSizes() {
-  for (const e of entries) {
-    const parts = storagePath(e.path).split('/').filter(Boolean);
-    const name = parts.pop();
-    const dir = await opfsDir(parts, false);
-    const fh = await dir.getFileHandle(name);
-    const h = await fh.createSyncAccessHandle();
-    const sz = h.getSize();
-    h.close();
-    if (sz !== e.size)
-      throw new Error('Проверка не пройдена: ' + e.path + ' на диске ' + sz +
-        ' байт, ожидалось ' + e.size + ' — повторите загрузку.');
-  }
-}
-
-// ── IDB accumulator route (fallback) ────────────────────────────────────────
-function accAppend(chunk) { if (chunk.byteLength) { accChunks.push(chunk); accSize += chunk.byteLength; } }
-function accRead(offset, size) {
-  const out = new Uint8Array(size);
-  let need = size, pos = 0, walk = offset - accBase;
-  for (const c of accChunks) {
-    if (walk >= c.byteLength) { walk -= c.byteLength; continue; }
-    const take = Math.min(need, c.byteLength - walk);
-    out.set(c.subarray(walk, walk + take), pos);
-    pos += take; need -= take; walk = 0;
-    if (need <= 0) break;
-  }
-  accTrim(offset + size);
-  return out;
-}
-function accTrim(absUpTo) {
-  let drop = absUpTo - accBase;
-  while (accChunks.length && drop >= accChunks[0].byteLength) {
-    drop -= accChunks[0].byteLength;
-    accBase += accChunks[0].byteLength;
-    accSize -= accChunks[0].byteLength;
-    accChunks.shift();
-  }
-  if (drop > 0 && accChunks.length) {
-    accChunks[0] = accChunks[0].subarray(drop);
-    accBase += drop; accSize -= drop;
-  }
-}
 function idbWrite(path, data) {
   return new Promise((resolve, reject) => {
     const tx = idb.transaction('files', 'readwrite');
@@ -238,177 +174,413 @@ function idbWrite(path, data) {
     tx.onerror = () => reject(tx.error);
   });
 }
-async function drainIdb() {
-  while (scheduledIdx < entries.length) {
-    const e = entries[scheduledIdx];
-    if (accBase + accSize < e.offset + e.size) break;
-    const data = accRead(e.offset, e.size);
-    await idbWrite(e.path, data);
-    scheduledIdx++;
-    writtenIdx++;
-    postMessage({ type: 'progress', done: writtenIdx, total: entries.length });
+
+// ── Decompression pool ────────────────────────────────────────────────────────
+
+class BrotliPool {
+  constructor(size, wasmUrl) {
+    this.size = size;
+    this.wasmUrl = wasmUrl;
+    this.workers = [];
+    this.results = new Map();   // segIdx -> Uint8Array (parked out-of-order)
+    this.gate = new Gate();     // woken on every result
+    this.errors = [];
   }
-}
-
-// One decompressed chunk → storage (streamed for OPFS, accumulated for IDB).
-async function onDecompressed(chunk) {
-  if (mode === 'opfs') await routeOpfs(chunk);
-  else { accAppend(chunk); await drainIdb(); }
-}
-
-function startSegment() {
-  ds = new brotli.DecompressStream();
-  segRemaining = segments[segIdx].csize;
-}
-
-// Feed a buffer of compressed bytes, routing them across segment boundaries.
-// Each segment has its own DecompressStream; a segment ends once exactly its
-// csize compressed bytes have been consumed, then the next stream begins.
-async function feed(input) {
-  let inOff = 0;
-  while (inOff < input.length && segIdx < segments.length) {
-    const avail = Math.min(input.length - inOff, segRemaining);
-    const slice = input.subarray(inOff, inOff + avail);
-    let sOff = 0;
-    for (;;) {
-      const res = ds.decompress(slice.subarray(sOff), OUT_CHUNK);
-      // Capture fields, then free the wasm-side result immediately. brotli-wasm
-      // shares one wasm instance across all segments; leaking DecompressStream
-      // and BrotliStreamResult objects grows its heap monotonically until it
-      // dies near ~2 GB of cumulative output (segment ~31/33) with a spurious
-      // "offset is out of bounds". Freeing keeps the heap bounded.
-      // NOTE: the `buf` getter slices AND frees the wasm buffer, so read it once.
-      const out = res.buf;
-      const code = res.code;
-      const inc = res.input_offset;
-      if (out.length) await onDecompressed(out);
-      if (res.free) res.free();
-      sOff += inc;
-      if (code === CODE_MORE_OUTPUT) {
-        if (out.length === 0 && inc === 0)
-          throw new Error('Декомпрессия застряла в сегменте ' + segIdx + ' (no progress)');
-        continue;   // buffered output — keep pulling
-      }
-      break;                                          // MORE_INPUT or SUCCESS — slice done
+  async start() {
+    const readies = [];
+    for (let i = 0; i < this.size; i++) {
+      const w = new Worker('unpack-brotli-worker.js?v=' + (self.gxVer || 'dev'));
+      readies.push(new Promise((resolve, reject) => {
+        const h = (ev) => {
+          if (ev.data.type === 'ready') { w.removeEventListener('message', h); resolve(); }
+          else if (ev.data.type === 'error') { w.removeEventListener('message', h); reject(new Error(ev.data.message)); }
+        };
+        w.addEventListener('message', h);
+      }));
+      w.addEventListener('message', (ev) => {
+        const m = ev.data;
+        if (m.type === 'seg') {
+          this.results.set(m.idx, new Uint8Array(m.buf));
+          w._busy = false;
+          this.gate.wake();
+        } else if (m.type === 'error') {
+          this.errors.push(new Error('Сегмент ' + m.idx + ': ' + m.message));
+          w._busy = false;
+          this.gate.wake();
+        }
+      });
+      w.addEventListener('error', (e) => {
+        this.errors.push(new Error('brotli-воркер: ' + (e.message || 'crash')));
+        this.gate.wake();
+      });
+      w._busy = false;
+      w.postMessage({ type: 'init', wasmUrl: this.wasmUrl });
+      this.workers.push(w);
     }
-    inOff += avail;
-    segRemaining -= avail;
-    if (segRemaining === 0) {                         // segment fully consumed
-      if (ds && ds.free) ds.free();                   // release the decoder state
-      ds = null;
-      segIdx++;
-      if (segIdx < segments.length) startSegment();
-    }
+    await Promise.all(readies);
   }
-}
-
-// Producer/consumer: network fills a bounded queue while the decompressor drains
-// it, so downloading later bytes overlaps decompress+write of earlier ones. The
-// queue is capped for back-pressure (never buffer the whole payload in RAM).
-async function run(url) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error('build.data недоступен: HTTP ' + resp.status);
-  const total = parseInt(resp.headers.get('Content-Length') || '0') || 0;
-
-  const reader = resp.body.getReader();
-  const QUEUE_MAX_BYTES = 96 * 1024 * 1024;
-
-  let queue = [];
-  let queuedBytes = 0;
-  let readerDone = false;
-  let notify = null, space = null;
-  const wake = (which) => { if (which === 'consumer' && notify) { notify(); notify = null; }
-                            if (which === 'producer' && space) { space(); space = null; } };
-
-  const producer = (async () => {
-    let received = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      received += value.byteLength;
-      postMessage({ type: 'download', received, total });
-      queue.push(value);
-      queuedBytes += value.byteLength;
-      wake('consumer');
-      while (queuedBytes >= QUEUE_MAX_BYTES) await new Promise((r) => { space = r; });
-    }
-    readerDone = true;
-    wake('consumer');
-  })();
-
-  const consumer = (async () => {
-    let parsing = true;
-    let headChunks = [], headLen = 0;
-    for (;;) {
-      if (queue.length === 0) {
-        if (readerDone) break;
-        await new Promise((r) => { notify = r; });
-        continue;
-      }
-      const value = queue.shift();
-      queuedBytes -= value.byteLength;
-      wake('producer');
-
-      if (parsing) {
-        headChunks.push(value); headLen += value.byteLength;
-        const head = headChunks.length === 1 ? headChunks[0] : concat(headChunks, headLen);
-        const parsed = tryParseIndex(head);
-        if (!parsed) continue;                       // need more bytes for the header
-        parsing = false;
-        entries = parsed.entries;
-        segments = parsed.segments;
-        segIdx = 0;
-        startSegment();
-        postMessage({ type: 'index', entries });
-        headChunks = null;
-        await feed(head.subarray(parsed.indexEnd));  // remainder is segment blob
-      } else {
-        await feed(value);
-      }
-    }
-  })();
-
-  await Promise.all([producer, consumer]);
-  // Flush any trailing zero-byte files (OPFS) — non-empty ones are already
-  // written as the cursor crossed their boundaries. (IDB drains inline.)
-  if (mode === 'opfs') await finishTrailingEmpties();
-
-  // Integrity guard: every file must be fully written. If the stream ended
-  // early (truncated download, decompress abort) some files are missing or
-  // half-written — fail loudly so the loader does NOT mark the build installed
-  // and boot the engine on corrupt data (which hangs it in loadFileDirectory).
-  if (curHandle) { try { curHandle.flush(); curHandle.close(); } catch {} curHandle = null; }
-  if (writtenIdx !== entries.length) {
-    throw new Error('Распаковка неполная: записано ' + writtenIdx + ' из ' +
-      entries.length + ' файлов (оборванная загрузка). Повторите.');
+  idle() { return this.workers.find((w) => !w._busy) || null; }
+  dispatch(idx, buf, usize) {
+    const w = this.idle();
+    if (!w) throw new Error('dispatch on full pool');
+    w._busy = true;
+    w.postMessage({ type: 'seg', idx, buf, usize }, [buf]);
   }
-  // Verify every file's on-disk size matches the index before declaring success.
-  if (mode === 'opfs') {
-    postMessage({ type: 'progress', done: entries.length, total: entries.length, verifying: true });
-    await verifyOpfsSizes();
+  take(idx) {
+    const r = this.results.get(idx);
+    if (r) this.results.delete(idx);
+    return r || null;
   }
-  postMessage({ type: 'complete', files: writtenIdx, entries });
+  throwIfFailed() { if (this.errors.length) throw this.errors[0]; }
+  terminate() { for (const w of this.workers) { try { w.terminate(); } catch {} } }
 }
 
-function concat(chunks, total) {
-  const out = new Uint8Array(total);
-  let p = 0;
-  for (const c of chunks) { out.set(c, p); p += c.byteLength; }
-  return out;
-}
+// ── Main run ──────────────────────────────────────────────────────────────────
+
+let mode = 'opfs';
+let entries = null;
+let segments = null;
+let segCAbs = null;   // absolute compressed offset of each segment in the file
+let segUAbs = null;   // absolute decompressed offset of each segment
+let indexEnd = 0;
+let writtenFiles = 0;
 
 self.onmessage = async (ev) => {
   const msg = ev.data;
+  if (msg.type !== 'start') return;
   try {
-    if (msg.type === 'start') {
-      mode = msg.mode;
-      await init(new URL(msg.wasmUrl));
-      CODE_MORE_OUTPUT = brotli.BrotliStreamResultCode.NeedsMoreOutput;
-      if (mode === 'opfs') opfsRoot = await navigator.storage.getDirectory();
-      else idb = await idbOpen();
-      await run(msg.url);
-    }
+    mode = msg.mode;
+    self.gxVer = msg.ver || 'dev';
+    if (mode === 'opfs') opfsRoot = await navigator.storage.getDirectory();
+    else idb = await idbOpen();
+    await run(msg.url, msg.wasmUrl, msg.resume || null);
   } catch (e) {
     postMessage({ type: 'error', message: e && e.message ? e.message : String(e) });
   }
 };
+
+async function fetchWithRetry(url, fromByte, onReconnect) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      const headers = {};
+      if (fromByte > 0) headers['Range'] = 'bytes=' + fromByte + '-';
+      const resp = await fetch(url, { headers });
+      if (!resp.ok && resp.status !== 206)
+        throw new Error('HTTP ' + resp.status);
+      // If we asked for a Range but the server ignored it (200), the caller
+      // must skip fromByte bytes manually.
+      const honored = fromByte === 0 || resp.status === 206;
+      return { resp, honored };
+    } catch (e) {
+      attempt++;
+      if (attempt > 5) throw new Error('Сеть недоступна после ' + (attempt - 1) + ' попыток: ' + (e && e.message ? e.message : e));
+      const waitMs = Math.min(1000 * Math.pow(2, attempt - 1), 15000);
+      onReconnect && onReconnect(attempt, waitMs);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+}
+
+async function run(url, wasmUrl, resume) {
+  // ── Phase 0: header ──────────────────────────────────────────────────────
+  // Fresh install: stream from byte 0 and parse the header from the first
+  // chunks (they arrive immediately). Resume: same, but we throw the stream
+  // away after the header and re-fetch from the resume offset — the header is
+  // tiny (<64 KB) so this costs nothing.
+  let headChunks = [], headLen = 0;
+  let parsed = null;
+  let firstResp = await fetchWithRetry(url, 0, sendReconnect);
+  let reader = firstResp.resp.body.getReader();
+  const totalCompressed = parseInt(firstResp.resp.headers.get('Content-Length') || '0') || (resume && resume.total) || 0;
+  const etag = firstResp.resp.headers.get('ETag') || firstResp.resp.headers.get('Last-Modified') || ('len:' + totalCompressed);
+
+  while (!parsed) {
+    const { done, value } = await reader.read();
+    if (done) throw new Error('Файл данных повреждён: заголовок не найден');
+    headChunks.push(value); headLen += value.byteLength;
+    const head = headChunks.length === 1 ? headChunks[0] : concat(headChunks, headLen);
+    parsed = tryParseIndex(head);
+    if (!parsed && headLen > 8 * 1024 * 1024) throw new Error('Заголовок слишком большой или повреждён');
+    if (parsed) headChunks = [head];   // keep the merged buffer
+  }
+  entries = parsed.entries;
+  segments = parsed.segments;
+  indexEnd = parsed.indexEnd;
+  postMessage({ type: 'index', entries });
+
+  // Absolute offsets per segment.
+  segCAbs = new Array(segments.length);
+  segUAbs = new Array(segments.length);
+  {
+    let c = indexEnd, u = 0;
+    for (let i = 0; i < segments.length; i++) {
+      segCAbs[i] = c; segUAbs[i] = u;
+      c += segments[i].csize; u += segments[i].usize;
+    }
+  }
+
+  // ── Resume decision ─────────────────────────────────────────────────────
+  let startSeg = 0;
+  if (resume && mode === 'opfs' &&
+      resume.etag === etag && resume.total === totalCompressed &&
+      Number.isInteger(resume.startSeg) && resume.startSeg > 0 && resume.startSeg < segments.length) {
+    startSeg = resume.startSeg;
+  }
+  const freshInstall = startSeg === 0;
+
+  // Position the network stream at startSeg's compressed offset.
+  let netAbs;              // absolute compressed position of next byte we'll consume
+  let acc = [], accLen = 0; // compressed accumulator (post-header bytes)
+  if (startSeg === 0) {
+    // Continue on the already-open stream: carve off what we have past the header.
+    const head = headChunks[0];
+    const rest = head.subarray(indexEnd);
+    if (rest.length) { acc.push(rest); accLen = rest.length; }
+    netAbs = indexEnd + rest.length;
+  } else {
+    // Drop the header stream; Range-fetch from the segment boundary.
+    try { reader.cancel(); } catch {}
+    const r2 = await fetchWithRetry(url, segCAbs[startSeg], sendReconnect);
+    reader = r2.resp.body.getReader();
+    netAbs = segCAbs[startSeg];
+    if (!r2.honored) {
+      // Server ignored Range: skip bytes until segCAbs[startSeg].
+      let skip = segCAbs[startSeg];
+      while (skip > 0) {
+        const { done, value } = await reader.read();
+        if (done) throw new Error('Поток закончился до точки докачки');
+        if (value.byteLength <= skip) { skip -= value.byteLength; }
+        else { acc.push(value.subarray(skip)); accLen += value.byteLength - skip; skip = 0; }
+      }
+    }
+    postMessage({ type: 'download', received: segCAbs[startSeg], total: totalCompressed });
+  }
+
+  // ── Pool ────────────────────────────────────────────────────────────────
+  const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+  const isApple = /iPhone|iPad|Macintosh/.test((typeof navigator !== 'undefined' && navigator.userAgent) || '');
+  const POOL = Math.max(2, Math.min(isApple ? 3 : 6, cores - 2));
+  const MAX_INFLIGHT = POOL + 2;
+  const pool = new BrotliPool(POOL, wasmUrl);
+  await pool.start();
+
+  // ── Writer state (in-order) ─────────────────────────────────────────────
+  let writeSeg = startSeg;    // next segment index the writer needs
+  let curIdx = 0;             // file cursor
+  let curHandle = null;
+  let curWritten = 0;
+  writtenFiles = 0;
+
+  if (startSeg > 0) {
+    // Fast-forward the file cursor to the resume point. Files fully before
+    // segUAbs[startSeg] were completed by earlier segments (their journal
+    // entries were only written after flush) — count them as written.
+    const uStart = segUAbs[startSeg];
+    while (curIdx < entries.length && entries[curIdx].offset + entries[curIdx].size <= uStart) {
+      curIdx++; writtenFiles++;
+    }
+    if (curIdx < entries.length && entries[curIdx].offset < uStart) {
+      // Spanning file: its head was written by the previous segments. Reopen
+      // WITHOUT truncate and continue at the boundary.
+      curHandle = await opfsOpen(entries[curIdx].path, false);
+      curWritten = uStart - entries[curIdx].offset;
+    }
+    postMessage({ type: 'progress', done: writtenFiles, total: entries.length });
+  }
+
+  async function finishCurrent() {
+    if (curHandle) { curHandle.flush(); curHandle.close(); curHandle = null; }
+    curIdx++;
+    writtenFiles++;
+    if (writtenFiles % 2 === 0 || writtenFiles === entries.length)
+      postMessage({ type: 'progress', done: writtenFiles, total: entries.length });
+  }
+
+  // Write one decompressed segment at its absolute offset, walking the file table.
+  async function writeSegment(segIdx, data) {
+    if (mode === 'idb') { await writeSegmentIdb(segIdx, data); return; }
+    let off = 0;
+    while (off < data.length) {
+      while (curHandle === null) {
+        if (curIdx >= entries.length) return;
+        const e = entries[curIdx];
+        curHandle = await opfsOpen(e.path, freshInstall || e.offset >= segUAbs[startSeg]);
+        curWritten = 0;
+        if (e.size === 0) await finishCurrent();
+      }
+      const e = entries[curIdx];
+      const take = Math.min(e.size - curWritten, data.length - off);
+      let w = 0;
+      while (w < take) {
+        let wrote;
+        try {
+          wrote = curHandle.write(data.subarray(off + w, off + take), { at: curWritten + w });
+        } catch (err) {
+          throw new Error('Запись ' + e.path + ' @' + (curWritten + w) + '/' + e.size + ': ' +
+            (err && err.message ? err.message : err));
+        }
+        if (!(wrote > 0)) throw new Error('Запись ' + e.path + ': нулевая запись');
+        w += wrote;
+      }
+      curWritten += take;
+      off += take;
+      if (curWritten >= e.size) await finishCurrent();
+    }
+  }
+
+  // IDB fallback: accumulate decompressed bytes per file (no partial writes).
+  let idbParts = [];
+  async function writeSegmentIdb(segIdx, data) {
+    let off = 0;
+    while (off < data.length) {
+      if (curIdx >= entries.length) return;
+      const e = entries[curIdx];
+      if (e.size === 0) { await idbWrite(e.path, new Uint8Array(0)); curIdx++; writtenFiles++; continue; }
+      const take = Math.min(e.size - curWritten, data.length - off);
+      idbParts.push(data.slice(off, off + take));
+      curWritten += take;
+      off += take;
+      if (curWritten >= e.size) {
+        const whole = concat(idbParts, e.size);
+        idbParts = [];
+        await idbWrite(e.path, whole);
+        curIdx++; curWritten = 0; writtenFiles++;
+        if (writtenFiles % 2 === 0) postMessage({ type: 'progress', done: writtenFiles, total: entries.length });
+      }
+    }
+  }
+
+  // ── Network → slicer → pool dispatch loop ───────────────────────────────
+  let recvSeg = startSeg;       // next segment to finish receiving
+  let dispatched = 0, written = 0; // counts for back-pressure (in-flight = dispatched - written)
+  let netDone = false;
+  let netError = null;
+
+  function sendReconnect(attempt, waitMs) {
+    postMessage({ type: 'reconnect', attempt, waitMs });
+  }
+
+  function accTake(n) {
+    // Remove exactly n bytes from the front of acc, return as one buffer.
+    const out = new Uint8Array(n);
+    let pos = 0;
+    while (pos < n) {
+      const c = acc[0];
+      const take = Math.min(c.byteLength, n - pos);
+      out.set(c.subarray(0, take), pos);
+      pos += take;
+      if (take === c.byteLength) acc.shift();
+      else acc[0] = c.subarray(take);
+    }
+    accLen -= n;
+    return out;
+  }
+
+  const netTask = (async () => {
+    try {
+      while (recvSeg < segments.length) {
+        // Assemble the next segment from the accumulator.
+        const need = segments[recvSeg].csize;
+        while (accLen < need) {
+          let r;
+          try {
+            r = await reader.read();
+          } catch (e) {
+            // Connection dropped mid-stream: retry with Range from netAbs.
+            const rr = await fetchWithRetry(url, netAbs, sendReconnect);
+            reader = rr.resp.body.getReader();
+            if (!rr.honored) {
+              let skip = netAbs;
+              while (skip > 0) {
+                const s = await reader.read();
+                if (s.done) throw new Error('Поток закончился при докачке');
+                if (s.value.byteLength <= skip) skip -= s.value.byteLength;
+                else { acc.push(s.value.subarray(skip)); accLen += s.value.byteLength - skip; skip = 0; }
+              }
+            }
+            continue;
+          }
+          if (r.done) throw new Error('Поток закончился раньше конца архива (сегмент ' + recvSeg + ')');
+          acc.push(r.value);
+          accLen += r.value.byteLength;
+          netAbs += r.value.byteLength;
+          postMessage({ type: 'download', received: netAbs, total: totalCompressed });
+        }
+        const segBuf = accTake(need);
+        const idx = recvSeg;
+        recvSeg++;
+
+        // Back-pressure: wait until pool has an idle worker AND in-flight cap ok.
+        for (;;) {
+          pool.throwIfFailed();
+          if (pool.idle() && (dispatched - written) < MAX_INFLIGHT) break;
+          await pool.gate.wait();
+        }
+        pool.dispatch(idx, segBuf.buffer, segments[idx].usize);
+        dispatched++;
+      }
+      try { reader.cancel(); } catch {}
+    } catch (e) {
+      netError = e;
+    } finally {
+      netDone = true;
+      pool.gate.wake();
+    }
+  })();
+
+  // ── In-order writer loop ────────────────────────────────────────────────
+  while (writeSeg < segments.length) {
+    // Wait for the next-needed segment to be decompressed.
+    let data;
+    for (;;) {
+      pool.throwIfFailed();
+      if (netError) throw netError;
+      data = pool.take(writeSeg);
+      if (data) break;
+      if (netDone && (dispatched - written) === 0 && recvSeg <= writeSeg) {
+        // Nothing in flight and network finished — the segment can never arrive.
+        throw netError || new Error('Сегмент ' + writeSeg + ' не получен (обрыв данных)');
+      }
+      await pool.gate.wait();
+    }
+    await writeSegment(writeSeg, data);
+    written++;
+    // Journal AFTER the segment's bytes are written AND flushed. A file that
+    // spans into the next segment keeps its handle open — flush it now so the
+    // journaled "segment complete" claim is durable (resume starts at the NEXT
+    // segment and will not rewrite this one's bytes).
+    if (curHandle) curHandle.flush();
+    postMessage({ type: 'journal', seg: writeSeg, etag, total: totalCompressed });
+    writeSeg++;
+    pool.gate.wake();  // free in-flight slot for the network task
+  }
+  await netTask;
+  if (netError) throw netError;
+
+  // Close a trailing open handle (file ending exactly at archive end).
+  if (curHandle) { curHandle.flush(); curHandle.close(); curHandle = null; curIdx++; writtenFiles++; }
+  // Trailing zero-byte files.
+  while (curIdx < entries.length && entries[curIdx].size === 0) {
+    if (mode === 'opfs') { const h = await opfsOpen(entries[curIdx].path, true); h.flush(); h.close(); }
+    else await idbWrite(entries[curIdx].path, new Uint8Array(0));
+    curIdx++; writtenFiles++;
+  }
+
+  pool.terminate();
+
+  if (writtenFiles !== entries.length)
+    throw new Error('Распаковка неполная: записано ' + writtenFiles + ' из ' + entries.length + ' файлов.');
+
+  // Verify on-disk sizes (OPFS): catches any truncated/short write.
+  if (mode === 'opfs') {
+    postMessage({ type: 'progress', done: entries.length, total: entries.length, verifying: true });
+    for (const e of entries) {
+      const sz = await opfsGetSize(e.path);
+      if (sz !== e.size)
+        throw new Error('Проверка не пройдена: ' + e.path + ' на диске ' + sz + ' байт, ожидалось ' + e.size);
+    }
+  }
+
+  postMessage({ type: 'complete', files: writtenFiles, entries });
+}

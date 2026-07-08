@@ -47,56 +47,101 @@ function gxHuman(b) {
   return b + ' Б';
 }
 
-// ── Stream extraction (worker-driven) ────────────────────────────────────
-// The worker fetches build.data itself and runs the whole pipeline (parse index,
-// brotli decompress, write to OPFS/IDB) on its own thread — no cross-thread
-// chunk flood. The main thread only relays progress to the UI.
-// Returns { files, entries } (entries needed for IDB materialization).
+// ── Stream extraction (worker-driven, resumable) ─────────────────────────
+// The dispatcher worker fetches build.data, slices it at segment boundaries,
+// decompresses segments on a parallel brotli sub-worker pool, and writes files
+// to OPFS in order. The main thread relays progress, persists a resume journal
+// per completed segment, and runs a watchdog: if the worker goes silent for
+// 60 s (deadlock, dropped promise, killed SW...) it is terminated and
+// restarted from the journaled segment — a hang becomes an automatic resume.
+// Returns { files, entries }.
 
-async function gxStreamExtract(url, storage) {
-  // The unpack worker is tiny (~9 KB) — always fetch fresh so a redeployed
-  // worker is never served stale from the browser's Worker script cache (which
-  // caused old builds to keep running with a since-fixed "offset out of bounds"
-  // path). brotli_bg.wasm (~1 MB, rarely changes) is versioned by buildId.
+async function gxStreamExtract(url, storage, journalKey) {
   const ver = (window.gxEngine && window.gxEngine.buildId) || 'dev';
+  const wasmUrl = new URL('brotli_bg.wasm?v=' + ver, document.baseURI).href;
+  const WATCHDOG_MS = 60000;
+  const MAX_RESTARTS = 4;
+
+  let restarts = 0;
+  for (;;) {
+    // Resume state from the journal (OPFS mode only; the worker re-validates
+    // the etag/total before honoring it).
+    let resume = null;
+    if (storage.kind === 'opfs' && journalKey) {
+      const j = await storage.readMeta(journalKey);
+      if (j && Number.isInteger(j.seg) && j.etag)
+        resume = { startSeg: j.seg + 1, etag: j.etag, total: j.total };
+    }
+
+    try {
+      return await gxRunUnpackWorker(url, wasmUrl, storage, journalKey, resume, ver, WATCHDOG_MS);
+    } catch (e) {
+      if (e && e.gxWatchdog && restarts < MAX_RESTARTS) {
+        restarts++;
+        console.warn('[loader] воркер молчал ' + (WATCHDOG_MS / 1000) + 'с — перезапуск ' +
+          restarts + '/' + MAX_RESTARTS + ' с докачкой');
+        gxUI.status('Загрузка зависла — перезапуск с докачкой (' + restarts + ')…');
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+function gxRunUnpackWorker(url, wasmUrl, storage, journalKey, resume, ver, watchdogMs) {
+  // The workers are tiny — always fetch fresh so a redeploy is never served a
+  // stale cached Worker script. brotli_bg.wasm (~1 MB) is versioned by buildId.
   const bust = ver + '.' + (Date.now() >>> 0);
   const worker = new Worker('unpack-worker.js?v=' + bust);
-  const wasmUrl = new URL('brotli_bg.wasm?v=' + ver, document.baseURI).href;
-  let entries = null;
 
-  const result = await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
+    let watchdog = null;
+    const arm = () => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        try { worker.terminate(); } catch {}
+        const err = new Error('unpack worker silent for ' + watchdogMs + 'ms');
+        err.gxWatchdog = true;
+        reject(err);
+      }, watchdogMs);
+    };
+    const done = (fn) => (v) => { if (watchdog) clearTimeout(watchdog); try { worker.terminate(); } catch {} fn(v); };
+    const ok = done(resolve), fail = done(reject);
+    arm();
+
     worker.addEventListener('message', (ev) => {
       const m = ev.data;
+      arm();                                          // any message = alive
       if (m.type === 'download') {
-        gxUI.download(m.received, m.total);          // gold bar — network
+        gxUI.download(m.received, m.total);
       } else if (m.type === 'index') {
-        entries = m.entries;
-        gxUI.unpack(0, entries.length);
+        gxUI.unpack(0, m.entries.length);
       } else if (m.type === 'progress') {
-        gxUI.unpack(m.done, m.total);                // green bar — decompress+write
+        gxUI.unpack(m.done, m.total);
+        if (m.verifying) gxUI.status('Проверка файлов…');
+      } else if (m.type === 'journal') {
+        // Persist resume state; fire-and-forget (journal loss only costs re-work).
+        if (storage.kind === 'opfs' && journalKey)
+          storage.writeMeta(journalKey, { seg: m.seg, etag: m.etag, total: m.total }).catch(() => {});
+      } else if (m.type === 'reconnect') {
+        gxUI.status('Соединение прервано — переподключение (попытка ' + m.attempt + ')…');
       } else if (m.type === 'complete') {
-        resolve({ files: m.files, entries: m.entries });
+        ok({ files: m.files, entries: m.entries });
       } else if (m.type === 'error') {
-        reject(new Error(m.message));
+        fail(new Error(m.message));
       }
     });
     worker.addEventListener('error', (e) => {
-      // A worker load/parse error (e.g. failed importScripts, COEP block) fires
-      // here with an empty message — surface filename:line so it's diagnosable.
       const where = e.filename ? (' @ ' + e.filename + ':' + e.lineno) : '';
-      const msg = e.message || 'не удалось загрузить unpack-worker.js';
       console.error('[loader] worker error event:', e);
-      reject(new Error('Worker: ' + msg + where));
+      fail(new Error('Worker: ' + (e.message || 'не удалось загрузить unpack-worker.js') + where));
     });
     worker.addEventListener('messageerror', (e) => {
       console.error('[loader] worker messageerror:', e);
-      reject(new Error('Worker: ошибка сериализации сообщения'));
+      fail(new Error('Worker: ошибка сериализации сообщения'));
     });
-    worker.postMessage({ type: 'start', url, wasmUrl, mode: storage.kind });
+    worker.postMessage({ type: 'start', url, wasmUrl, mode: storage.kind, resume, ver: bust });
   });
-
-  worker.terminate();
-  return result;
 }
 
 // ── Checks & init ────────────────────────────────────────────────────────────
@@ -217,11 +262,15 @@ async function gxBoot() {
     gxUI.download(0, 0);
     gxUI.unpack(0, 0);
 
-    // The worker fetches, parses the index, decompresses, and writes files to
-    // storage — download and unpack progress run in parallel.
-    const url = 'assets/' + encodeURIComponent(build) + '/build.data?cb=' + Date.now();
+    // The dispatcher worker fetches, slices segments, decompresses them on a
+    // parallel pool, and writes files — download and unpack run concurrently.
+    // NOTE: a STABLE url (no cache-buster) so Range resume across page reloads
+    // targets the same resource; freshness is validated by the server ETag in
+    // the resume journal.
+    const url = 'assets/' + encodeURIComponent(build) + '/build.data';
+    const journalKey = 'unpack-journal-' + build;
     gxUI.status('Загрузка и распаковка ресурсов…');
-    const result = await gxStreamExtract(url, storage);
+    const result = await gxStreamExtract(url, storage, journalKey);
     console.log('[loader] распаковано ' + result.files + ' файлов');
 
     // IndexedDB mode: materialize files into window.gxFiles for the engine.
@@ -230,8 +279,9 @@ async function gxBoot() {
       await gxMaterializeIdb(storage);
     }
 
-    // Mark this build installed so a page reload skips the download.
+    // Mark installed; drop the resume journal (it's for interrupted installs).
     await storage.writeMeta(markerKey, { complete: true, files: result.files, ts: Date.now() });
+    if (storage.kind === 'opfs') await storage.writeMeta(journalKey, {}).catch(() => {});
 
     gxUI.status('Запуск движка…');
     document.getElementById('gx-progress-wrap').style.display = 'none';
