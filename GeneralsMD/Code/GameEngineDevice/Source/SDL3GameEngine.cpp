@@ -654,6 +654,22 @@ void SDL3GameEngine::pollSDL3Events(void)
 
 			case SDL_EVENT_KEY_DOWN:
 			case SDL_EVENT_KEY_UP:
+#ifdef __EMSCRIPTEN__
+				// GeneralsX @bugfix web-port 09/07/2026 Self-healing focus: after
+				// repeated tab minimize/restore cycles the browser can deliver a
+				// blur without a matching focus, leaving m_IsActive=false and the
+				// mouse capture blocked forever ("controls stopped working" while
+				// the game itself kept running). Real input arriving IS proof of
+				// focus - recover on the spot instead of waiting for an event
+				// that may never come.
+				if (!m_IsActive && event.type == SDL_EVENT_KEY_DOWN) {
+					m_IsActive = true;
+					if (TheMouse) {
+						TheMouse->regainFocus();
+						TheMouse->refreshCursorCapture();
+					}
+				}
+#endif
 				// Fighter19 pattern: direct addSDLEvent() call
 				// GeneralsX @refactor felipebraz 16/02/2026 Simplified event routing
 				if (TheKeyboard) {
@@ -693,6 +709,18 @@ void SDL3GameEngine::pollSDL3Events(void)
 			case SDL_EVENT_MOUSE_BUTTON_DOWN:
 			case SDL_EVENT_MOUSE_BUTTON_UP:
 			case SDL_EVENT_MOUSE_WHEEL:
+#ifdef __EMSCRIPTEN__
+				// Self-healing focus (see the key-event twin above): a real click
+				// proves the tab is focused even if the browser's focus event got
+				// lost across minimize/restore churn.
+				if (!m_IsActive && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+					m_IsActive = true;
+					if (TheMouse) {
+						TheMouse->regainFocus();
+						TheMouse->refreshCursorCapture();
+					}
+				}
+#endif
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 				// Belt-and-braces: drop SDL's own touch-synthesized mouse events.
 				// The gesture translator owns all touch->mouse conversion; double

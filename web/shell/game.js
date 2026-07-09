@@ -108,6 +108,8 @@ async function gxStartGame() {
 
   // Arm the hotkey guard for the whole game session.
   gxInstallKeyGuard();
+  // And the focus guard (minimize/restore resilience).
+  gxInstallFocusGuard();
 
   return new Promise((resolve, reject) => {
     const canvas = document.getElementById('canvas');
@@ -151,6 +153,32 @@ async function gxStartGame() {
     s.onerror = () => reject(new Error('Не удалось загрузить GeneralsXZH.js'));
     document.body.appendChild(s);
   });
+}
+
+// Focus resilience: after minimize/restore churn the browser can leave the tab
+// focused but SDL's notion of focus stuck at "lost" (blur delivered without a
+// matching focus). Re-assert focus on the canvas whenever the tab becomes
+// visible or the window regains OS focus, and on any pointer-down — a focused
+// canvas makes SDL's Emscripten_GetFocusedWindow() resolve correctly and lets
+// its window-level key handlers see events again.
+function gxInstallFocusGuard() {
+  if (window.gxFocusGuard) return;
+  const refocus = () => {
+    const cv = document.getElementById('canvas');
+    if (!cv) return;
+    // Only steal focus when nothing interactive holds it (don't fight inputs).
+    const ae = document.activeElement;
+    if (!ae || ae === document.body || ae === cv) {
+      try { cv.focus({ preventScroll: true }); } catch {}
+    }
+  };
+  window.gxFocusGuard = refocus;
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) setTimeout(refocus, 0);
+  });
+  window.addEventListener('focus', () => setTimeout(refocus, 0));
+  window.addEventListener('pointerdown', refocus, { capture: true });
+  refocus();
 }
 
 // Called when the engine quits (from C++ before _exit, and via Module.onExit).
