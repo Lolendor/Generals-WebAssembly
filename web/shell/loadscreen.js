@@ -2,15 +2,15 @@
 //
 // During map load the game pthread is blocked and OffscreenCanvas frames are
 // never composited (browsers only push them when the worker yields). The
-// engine-side pump (LoadScreen.cpp, gxWebPumpLoadFrame) grabs each finished
-// load-screen frame with transferToImageBitmap() and posts it here over
-// BroadcastChannel('gx-frames'). We paint those ORIGINAL engine frames onto a
-// fullscreen overlay canvas (ImageBitmapRenderingContext = zero-copy), so the
-// player sees the real load screen — background art, portraits, per-player
-// progress bars — exactly as rendered.
+// engine-side pump (LoadScreen.cpp, gxWebPumpLoadFrame) glReadPixels() the
+// just-rendered ORIGINAL load-screen frame — non-destructively, the game
+// canvas is never touched — and hands the RGBA pixels here via
+// MAIN_THREAD_EM_ASM. We paint them onto a fullscreen overlay canvas, so the
+// player sees the real load screen (background art, portraits, per-player
+// progress bars) exactly as the engine rendered it.
 //
-// Protocol: {t:'begin'} → show overlay; {t:'frame', bmp} → paint; {t:'end'} →
-// hide. The overlay sits above the (frozen) game canvas and below the shell UI.
+// GL rows are bottom-up; the overlay flips via ctx.scale(1,-1) so the frame
+// lands upright without a CPU flip pass.
 //
 // GeneralsX @build web-port loadscreen 09/07/2026
 
@@ -30,7 +30,7 @@ const gxLoadScreen = {
       'display:none;background:#000;pointer-events:none;';
     document.body.appendChild(cv);
     this.canvas = cv;
-    this.ctx = cv.getContext('bitmaprenderer');
+    this.ctx = cv.getContext('2d');
   },
 
   begin() {
@@ -39,31 +39,29 @@ const gxLoadScreen = {
     this.canvas.style.display = 'block';
   },
 
-  frame(bmp) {
-    if (!this.active) { try { bmp.close(); } catch {} return; }
+  // px: Uint8Array RGBA, bottom-up (GL readback). w/h in pixels.
+  frameRGBA(px, w, h) {
+    if (!this.active) return;
     this._ensure();
-    // Match the backing store to the frame once (bitmaprenderer scales via CSS).
-    if (this.canvas.width !== bmp.width || this.canvas.height !== bmp.height) {
-      this.canvas.width = bmp.width;
-      this.canvas.height = bmp.height;
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = w;
+      this.canvas.height = h;
     }
-    this.ctx.transferFromImageBitmap(bmp);   // zero-copy hand-off
+    const img = new ImageData(new Uint8ClampedArray(px.buffer, px.byteOffset, w * h * 4), w, h);
+    // putImageData ignores transforms — draw via an ImageBitmap-less flip:
+    // put the (upside-down) frame, then flip it in place with drawImage.
+    this.ctx.putImageData(img, 0, 0);
+    this.ctx.save();
+    this.ctx.globalCompositeOperation = 'copy';
+    this.ctx.scale(1, -1);
+    this.ctx.drawImage(this.canvas, 0, -h);
+    this.ctx.restore();
   },
 
   end() {
     this.active = false;
     if (this.canvas) this.canvas.style.display = 'none';
   },
-};
-
-// Frames arrive from the game pthread over a BroadcastChannel.
-const gxFrameCh = new BroadcastChannel('gx-frames');
-gxFrameCh.onmessage = (e) => {
-  const m = e.data;
-  if (!m) return;
-  if (m.t === 'frame' && m.bmp) gxLoadScreen.frame(m.bmp);
-  else if (m.t === 'begin') gxLoadScreen.begin();
-  else if (m.t === 'end') gxLoadScreen.end();
 };
 
 window.gxLoadScreen = gxLoadScreen;
