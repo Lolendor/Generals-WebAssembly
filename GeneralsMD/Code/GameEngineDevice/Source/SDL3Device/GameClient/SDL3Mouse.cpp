@@ -29,6 +29,7 @@
 
 // GeneralsX @bugfix BenderAI 13/02/2026 Fix include path (fighter19 pattern)
 #include "SDL3Device/GameClient/SDL3Mouse.h"
+#include "SDL3GameEngine.h"   // TheSDL3Window (windowID=0 fallback after focus loss)
 #include <cstdio>
 #include <cstring>
 
@@ -778,6 +779,15 @@ void SDL3Mouse::translateWheelEvent(const SDL_MouseWheelEvent& event, MouseIO *r
 void SDL3Mouse::scaleMouseCoordinates(int rawX, int rawY, Uint32 windowID, int& scaledX, int& scaledY)
 {
 	SDL_Window* window = SDL_GetWindowFromID(windowID);
+	// GeneralsX @bugfix web-port 09/07/2026 After a minimize/restore cycle the
+	// browser can leave SDL's keyboard focus NULL, and every mouse event then
+	// carries windowID=0. Falling back to RAW coordinates here silently broke
+	// all clicks (no pillarbox offset, no internal-resolution scaling - clicks
+	// landed far off every UI element = "mouse stopped working"). The game has
+	// exactly one window; use it whenever the event's windowID doesn't resolve.
+	if (!window) {
+		window = TheSDL3Window;
+	}
 	if (!window || !TheDisplay) {
 		scaledX = rawX;
 		scaledY = rawY;
