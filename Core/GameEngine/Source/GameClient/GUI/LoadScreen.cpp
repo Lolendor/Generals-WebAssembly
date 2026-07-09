@@ -140,54 +140,64 @@ FRAME_RIGHT_VOICE = 140,
 static const Int TELETYPE_UPDATE_FREQ = 2; // how many frames between teletype updates
 
 #ifdef __EMSCRIPTEN__
-// GeneralsX @build web-port 09/07/2026 Load-screen frame pump.
+// GeneralsX @build web-port 09/07/2026 Load-screen frame pump (v2, glReadPixels).
 // The engine draws its ORIGINAL load screen into the OffscreenCanvas from the
 // blocked game pthread, but browsers only composite OffscreenCanvas frames
-// when the worker yields to its event loop - which the synchronous map load
-// never does, so the real load screen (background art, generals' portraits,
-// per-player progress bars) rendered into the void.
+// when the worker yields - which the synchronous map load never does, so the
+// real load screen rendered into the void.
 //
-// Verified fix (empirically, in Chrome): transferToImageBitmap() is
-// synchronous and BroadcastChannel.postMessage() delivers without the sender
-// yielding - so the blocked pthread can hand each finished frame to the main
-// thread, which paints it onto a visible overlay canvas (bitmaprenderer).
-// The player sees the exact pixels the engine rendered - 1:1 the original
-// screen. Detaching the buffer is harmless: rAF isn't presenting during load,
-// and the engine redraws full frames (preserveDrawingBuffer=false anyway).
+// v1 used canvas.transferToImageBitmap(): it delivered frames, but DETACHES
+// the OffscreenCanvas buffer, which breaks emscripten's canvas-size bookkeeping
+// (GL.offscreenCanvases) - the next Emscripten_HandleResize crashed with
+// "Cannot read properties of null" in setCanvasElementSizeCallingThread and the
+// display never recovered (permanent black screen, observed in MP logs).
 //
-// Throttled to ~30 fps. EM_ASM runs ON THIS pthread (the canvas owner);
-// Module['canvas'] here IS the transferred OffscreenCanvas (libpthread.js).
+// v2 is non-destructive: glReadPixels (synchronous, legal on the blocked
+// context-owning thread) copies the just-rendered backbuffer, and the pixels
+// go to the main thread by simple copy out of the wasm heap; the overlay
+// canvas putImageData()s them. ~4 MB per 1080p frame at <=15 fps, only while
+// loading. The game canvas is never touched.
 #include <emscripten.h>
 #include <emscripten/threading.h>
+#include <GLES3/gl3.h>
 static void gxWebPumpLoadFrame(void)
 {
 	static double s_lastPump = 0.0;
+	static unsigned char *s_buf = nullptr;
+	static int s_bufW = 0, s_bufH = 0;
 	const double now = emscripten_get_now();
-	if (now - s_lastPump < 33.0) return;   // ~30 fps cap
+	if (now - s_lastPump < 66.0) return;   // ~15 fps is plenty for a load screen
 	s_lastPump = now;
-	EM_ASM({
-		try {
-			var cv = Module['canvas'];
-			if (cv && cv.transferToImageBitmap) {
-				if (!Module['gxFrameCh']) Module['gxFrameCh'] = new BroadcastChannel('gx-frames');
-				var bmp = cv.transferToImageBitmap();
-				Module['gxFrameCh'].postMessage({ t: 'frame', bmp: bmp });
-			}
-		} catch (e) { /* context lost / zero-size - skip this frame */ }
-	});
+
+	GLint vp[4] = {0, 0, 0, 0};
+	glGetIntegerv(GL_VIEWPORT, vp);
+	const int w = vp[2], h = vp[3];
+	if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
+	if (!s_buf || s_bufW != w || s_bufH != h) {
+		free(s_buf);
+		s_buf = (unsigned char *)malloc((size_t)w * h * 4);
+		s_bufW = w; s_bufH = h;
+		if (!s_buf) return;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);   // read the default backbuffer
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, s_buf);
+
+	// Ship a copy to the main thread. HEAPU8.slice() copies out of the (shared)
+	// wasm heap; ImageData wants un-premultiplied RGBA which is what GL gives.
+	MAIN_THREAD_EM_ASM({
+		if (window.gxLoadScreen) {
+			var px = HEAPU8.slice($0, $0 + $1 * $2 * 4);
+			window.gxLoadScreen.frameRGBA(px, $1, $2);
+		}
+	}, s_buf, w, h);
 }
 static void gxWebLoadScreenBegin(void)
 {
-	EM_ASM({
-		if (!Module['gxFrameCh']) Module['gxFrameCh'] = new BroadcastChannel('gx-frames');
-		Module['gxFrameCh'].postMessage({ t: 'begin' });
-	});
+	MAIN_THREAD_EM_ASM({ if (window.gxLoadScreen) window.gxLoadScreen.begin(); });
 }
 static void gxWebLoadScreenEnd(void)
 {
-	EM_ASM({
-		if (Module['gxFrameCh']) Module['gxFrameCh'].postMessage({ t: 'end' });
-	});
+	MAIN_THREAD_EM_ASM({ if (window.gxLoadScreen) window.gxLoadScreen.end(); });
 }
 #else
 #define gxWebPumpLoadFrame()    ((void)0)
