@@ -166,7 +166,7 @@ static void gxWebPumpLoadFrame(void)
 	static unsigned char *s_buf = nullptr;
 	static int s_bufW = 0, s_bufH = 0;
 	const double now = emscripten_get_now();
-	if (now - s_lastPump < 66.0) return;   // ~15 fps is plenty for a load screen
+	if (now - s_lastPump < 33.0) return;   // ~30 fps (mission intro movies play in this path)
 	s_lastPump = now;
 
 	GLint vp[4] = {0, 0, 0, 0};
@@ -661,6 +661,7 @@ void SinglePlayerLoadScreen::init( GameInfo *game )
 
 			// redraw all views, update the GUI
 			TheDisplay->draw();
+			gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 		}
 
 #if !RTS_GENERALS
@@ -669,6 +670,7 @@ void SinglePlayerLoadScreen::init( GameInfo *game )
 		m_videoStream = nullptr;
 		m_loadScreen->winGetInstanceData()->setVideoBuffer( nullptr );
 		TheDisplay->draw();
+		gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 #endif
 	}
 	else
@@ -715,6 +717,7 @@ void SinglePlayerLoadScreen::init( GameInfo *game )
 
 			TheWindowManager->update();
 			TheDisplay->draw();
+			gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 			Sleep(100);
 			currTime = timeGetTime();
 		}
@@ -722,6 +725,7 @@ void SinglePlayerLoadScreen::init( GameInfo *game )
 
 		TheWindowManager->update();
 		TheDisplay->draw();
+		gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 
 	}
 	setFPMode();
@@ -1182,6 +1186,7 @@ void ChallengeLoadScreen::init( GameInfo *game )
 
 			// redraw all views, update the GUI
 			TheDisplay->draw();
+			gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 
 			TheAudio->update();
 		}
@@ -1221,6 +1226,7 @@ void ChallengeLoadScreen::init( GameInfo *game )
 
 			TheWindowManager->update();
 			TheDisplay->draw();
+			gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 			Sleep(100);
 			currTime = timeGetTime();
 		}
@@ -1228,6 +1234,7 @@ void ChallengeLoadScreen::init( GameInfo *game )
 		m_wndVideoManager->update();
 		TheWindowManager->update();
 		TheDisplay->draw();
+		gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 	}
 	setFPMode();
 
