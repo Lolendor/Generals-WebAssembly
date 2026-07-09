@@ -140,47 +140,59 @@ FRAME_RIGHT_VOICE = 140,
 static const Int TELETYPE_UPDATE_FREQ = 2; // how many frames between teletype updates
 
 #ifdef __EMSCRIPTEN__
-// GeneralsX @build web-port 09/07/2026 DOM load-screen mirror.
-// The engine's own load screen renders into the OffscreenCanvas from the
+// GeneralsX @build web-port 09/07/2026 Load-screen frame pump.
+// The engine draws its ORIGINAL load screen into the OffscreenCanvas from the
 // blocked game pthread, but browsers only composite OffscreenCanvas frames
 // when the worker yields to its event loop - which the synchronous map load
-// never does. So every draw here lands in the void and the player stares at a
-// frozen frame until loading ends. These helpers mirror the same progress data
-// to a DOM overlay (web/shell/loadscreen.js) on the main thread, which always
-// paints. UTF-16 player names are passed as pointer+length and decoded there.
+// never does, so the real load screen (background art, generals' portraits,
+// per-player progress bars) rendered into the void.
+//
+// Verified fix (empirically, in Chrome): transferToImageBitmap() is
+// synchronous and BroadcastChannel.postMessage() delivers without the sender
+// yielding - so the blocked pthread can hand each finished frame to the main
+// thread, which paints it onto a visible overlay canvas (bitmaprenderer).
+// The player sees the exact pixels the engine rendered - 1:1 the original
+// screen. Detaching the buffer is harmless: rAF isn't presenting during load,
+// and the engine redraws full frames (preserveDrawingBuffer=false anyway).
+//
+// Throttled to ~30 fps. EM_ASM runs ON THIS pthread (the canvas owner);
+// Module['canvas'] here IS the transferred OffscreenCanvas (libpthread.js).
 #include <emscripten.h>
-static void gxWebLoadScreenBegin(const char *kind)
+#include <emscripten/threading.h>
+static void gxWebPumpLoadFrame(void)
 {
-	MAIN_THREAD_EM_ASM({
-		if (window.gxLoadScreen) window.gxLoadScreen.begin(UTF8ToString($0));
-	}, kind);
+	static double s_lastPump = 0.0;
+	const double now = emscripten_get_now();
+	if (now - s_lastPump < 33.0) return;   // ~30 fps cap
+	s_lastPump = now;
+	EM_ASM({
+		try {
+			var cv = Module['canvas'];
+			if (cv && cv.transferToImageBitmap) {
+				if (!Module['gxFrameCh']) Module['gxFrameCh'] = new BroadcastChannel('gx-frames');
+				var bmp = cv.transferToImageBitmap();
+				Module['gxFrameCh'].postMessage({ t: 'frame', bmp: bmp });
+			}
+		} catch (e) { /* context lost / zero-size - skip this frame */ }
+	});
 }
-static void gxWebLoadScreenSetPlayer(int slot, const UnicodeString &name)
+static void gxWebLoadScreenBegin(void)
 {
-	MAIN_THREAD_EM_ASM({
-		var chars = [];
-		for (var i = 0; i < $2; i++) chars.push(HEAPU32[($1 >> 2) + i]);
-		if (window.gxLoadScreen)
-			window.gxLoadScreen.setPlayer($0, String.fromCodePoint.apply(null, chars));
-	}, slot, name.str(), (int)name.getLength());
-}
-static void gxWebLoadScreenProgress(int slot, int pct)
-{
-	MAIN_THREAD_EM_ASM({
-		if (window.gxLoadScreen) window.gxLoadScreen.progress($0, $1);
-	}, slot, pct);
+	EM_ASM({
+		if (!Module['gxFrameCh']) Module['gxFrameCh'] = new BroadcastChannel('gx-frames');
+		Module['gxFrameCh'].postMessage({ t: 'begin' });
+	});
 }
 static void gxWebLoadScreenEnd(void)
 {
-	MAIN_THREAD_EM_ASM({
-		if (window.gxLoadScreen) window.gxLoadScreen.end();
+	EM_ASM({
+		if (Module['gxFrameCh']) Module['gxFrameCh'].postMessage({ t: 'end' });
 	});
 }
 #else
-#define gxWebLoadScreenBegin(kind)            ((void)0)
-#define gxWebLoadScreenSetPlayer(slot, name)  ((void)0)
-#define gxWebLoadScreenProgress(slot, pct)    ((void)0)
-#define gxWebLoadScreenEnd()                  ((void)0)
+#define gxWebPumpLoadFrame()    ((void)0)
+#define gxWebLoadScreenBegin()  ((void)0)
+#define gxWebLoadScreenEnd()    ((void)0)
 #endif
 
 
@@ -212,6 +224,10 @@ void LoadScreen::update( Int percent )
 	TheDisplay->update();
 	// redraw all views, update the GUI
 	TheDisplay->draw();
+
+	// GeneralsX @build web-port 09/07/2026 Ship the just-rendered load-screen
+	// frame to the visible canvas (the blocked pthread can't present itself).
+	gxWebPumpLoadFrame();
 
 	setFPMode();
 }
@@ -421,7 +437,7 @@ void SinglePlayerLoadScreen::moveWindows( Int frame )
 
 void SinglePlayerLoadScreen::init( GameInfo *game )
 {
-	gxWebLoadScreenBegin("single");
+	gxWebLoadScreenBegin();
 	//No music in SinglePlayerLoadScreen
 
 	// create the layout of the load screen
@@ -718,7 +734,6 @@ void SinglePlayerLoadScreen::update( Int percent )
 	TheMouse->setCursorTooltip(UnicodeString::TheEmptyString);
 	GadgetProgressBarSetProgress(m_progressBar, percent);
 	GadgetStaticTextSetText(m_percent, per);
-	gxWebLoadScreenProgress(0, percent);
 
 	// Do this last!
 	LoadScreen::update( percent );
@@ -980,7 +995,7 @@ void ChallengeLoadScreen::activatePiecesMinSpec(const GeneralPersona *generalPla
 
 void ChallengeLoadScreen::init( GameInfo *game )
 {
-	gxWebLoadScreenBegin("single");
+	gxWebLoadScreenBegin();
 	const Campaign *campaign = TheCampaignManager->getCurrentCampaign();
 	const Mission *mission = TheCampaignManager->getCurrentMission();
 
@@ -1227,7 +1242,6 @@ void ChallengeLoadScreen::update( Int percent )
 	per.format(L"%d%%",percent);
 	TheMouse->setCursorTooltip(UnicodeString::TheEmptyString);
 	GadgetProgressBarSetProgress(m_progressBar, percent);
-	gxWebLoadScreenProgress(0, percent);
 
 	// Do this last!
 	LoadScreen::update( percent );
@@ -1251,6 +1265,7 @@ ShellGameLoadScreen::~ShellGameLoadScreen()
 
 void ShellGameLoadScreen::init( GameInfo *game )
 {
+	gxWebLoadScreenBegin();
 	static BOOL firstLoad = TRUE;
 
 
@@ -1326,7 +1341,7 @@ MultiPlayerLoadScreen::~MultiPlayerLoadScreen()
 
 void MultiPlayerLoadScreen::init( GameInfo *game )
 {
-	gxWebLoadScreenBegin("multi");
+	gxWebLoadScreenBegin();
 	// create the layout of the load screen
 	m_loadScreen = TheWindowManager->winCreateFromScript( "Menus/MultiplayerLoadScreen.wnd" );
 	DEBUG_ASSERTCRASH(m_loadScreen, ("Can't initialize the Multiplayer loadscreen"));
@@ -1468,8 +1483,6 @@ void MultiPlayerLoadScreen::init( GameInfo *game )
 		}
 
 		m_playerLookup[i] = netSlot; // save our mapping so we can update progress correctly
-		if (!slot->isAI())
-			gxWebLoadScreenSetPlayer(i, name);
 
 		netSlot++;
 	}
@@ -1550,7 +1563,6 @@ void MultiPlayerLoadScreen::processProgress(Int playerId, Int percentage)
 	//DEBUG_LOG(("Percentage %d was passed in for Player %d (in loadscreen position %d)", percentage, playerId, m_playerLookup[playerId]));
 	if(m_progressBars[m_playerLookup[playerId]])
 		GadgetProgressBarSetProgress(m_progressBars[m_playerLookup[playerId]], percentage );
-	gxWebLoadScreenProgress(playerId, percentage);
 }
 
 // GameSpyLoadScreen Class //////////////////////////////////////////////////
@@ -1593,6 +1605,7 @@ extern Int GetAdditionalDisconnectsFromUserFile(Int playerID);
 
 void GameSpyLoadScreen::init( GameInfo *game )
 {
+	gxWebLoadScreenBegin();
 	// create the layout of the load screen
 	m_loadScreen = TheWindowManager->winCreateFromScript( "Menus/GameSpyLoadScreen.wnd" );
 	DEBUG_ASSERTCRASH(m_loadScreen, ("Can't initialize the Multiplayer loadscreen"));
@@ -1910,7 +1923,6 @@ void GameSpyLoadScreen::processProgress(Int playerId, Int percentage)
 	//DEBUG_LOG(("Percentage %d was passed in for Player %d (in loadscreen position %d)", percentage, playerId, m_playerLookup[playerId]));
 	if(m_progressBars[m_playerLookup[playerId]])
 		GadgetProgressBarSetProgress(m_progressBars[m_playerLookup[playerId]], percentage );
-	gxWebLoadScreenProgress(playerId, percentage);
 }
 
 // MapTransferLoadScreen Class //////////////////////////////////////////////////
@@ -1936,6 +1948,7 @@ MapTransferLoadScreen::~MapTransferLoadScreen()
 
 void MapTransferLoadScreen::init( GameInfo *game )
 {
+	gxWebLoadScreenBegin();
 	// create the layout of the load screen
 	m_loadScreen = TheWindowManager->winCreateFromScript( "Menus/MapTransferScreen.wnd" );
 	DEBUG_ASSERTCRASH(m_loadScreen, ("Can't initialize the map transfer loadscreen"));
@@ -1998,8 +2011,6 @@ void MapTransferLoadScreen::init( GameInfo *game )
 			m_progressBars[netSlot]->winHide(TRUE);
 
 		m_playerLookup[i] = netSlot; // save our mapping so we can update progress correctly
-		if (!slot->isAI())
-			gxWebLoadScreenSetPlayer(i, name);
 
 		netSlot++;
 	}
