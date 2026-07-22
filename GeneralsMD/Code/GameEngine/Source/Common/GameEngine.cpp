@@ -1022,7 +1022,16 @@ void GameEngine::execute()
 		{
 			fprintf(stderr, "INFO: GameEngine quitting - stopping web main loop\n");
 			emscripten_cancel_main_loop();
-			// Page-side JS shows the exit panel via Module.onExit.
+			// GeneralsX @build web-port 08/07/2026 Quit tears down the wasm
+			// runtime (_exit) — it cannot restart in place. Reload the page so
+			// the shell returns to the start overlay (Play button); assets are
+			// already cached in OPFS, so Play relaunches quickly. Done on the
+			// main thread directly (Module.onExit is unreliable under
+			// PROXY_TO_PTHREAD + _exit).
+			MAIN_THREAD_EM_ASM({
+				if (typeof gxOnEngineExit === 'function') gxOnEngineExit();
+				else location.reload();
+			});
 			_exit(0);
 		}
 

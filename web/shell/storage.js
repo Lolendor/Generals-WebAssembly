@@ -50,7 +50,8 @@ async function gxDetectStorage() {
     const db = await IdbStorage.open();
     return db;
   }
-  throw new Error('Ни OPFS, ни IndexedDB недоступны — хранилище для файлов игры отсутствует.');
+  // GeneralsX @feature Lolendor 22/07/2026 Localize launch-screen storage errors.
+  throw new Error(window.gxI18n.t('error.storage'));
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +148,20 @@ class OpfsStorage {
     return await f.arrayBuffer();
   }
 
+  async listPaths() {
+    const paths = [];
+    async function walk(dir, prefix) {
+      for await (const [name, handle] of dir) {
+        const full = prefix ? prefix + '/' + name : name;
+        if (handle.kind === 'file') paths.push(full);
+        else await walk(handle, full);
+      }
+    }
+    await walk(this.root, '');
+    // Filter out meta/ and userdata/ for the caller's convenience.
+    return paths.filter(p => !p.startsWith('meta/'));
+  }
+
   async remove(path) {
     try {
       const { dir, name } = await this._dir(gxStoragePath(path), false);
@@ -161,6 +176,14 @@ class OpfsStorage {
         console.log('[storage] navigator.storage.persist() ->', ok);
       }
     } catch {}
+  }
+
+  async writeBlob(path, blob) {
+    const { dir, name } = await this._dir(gxStoragePath(path), true);
+    const fh = await dir.getFileHandle(name, { create: true });
+    const w = await fh.createWritable();
+    await w.write(blob);
+    await w.close();
   }
 
   async estimate() {

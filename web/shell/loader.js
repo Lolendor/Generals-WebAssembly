@@ -1,27 +1,29 @@
 // GeneralsX Web - asset loader.
 //
-// STATIC-FIRST: every request is a relative path, so the dist/ bundle works
-// from any directory of any web server (the optional Go server is just a
-// convenience for dev / self-signed TLS). COOP/COEP on bare static hosts is
-// handled by coi-serviceworker.js.
+// Streams build.data (GAXD format): reads index from stream start,
+// pipes compressed blob through DecompressionStream, splits decompressed
+// data into files and writes them to OPFS/IDB concurrently (4 in parallel).
 //
-// Flow (runs before the wasm module starts):
-//   1. detect storage driver (OPFS preferred, IndexedDB fallback)
-//   2. fetch assets/manifest.json (+ optional ice.json network config)
-//   3. diff against the installed manifest (per-file sha256)
-//   4. download missing/changed files with progress, store them
-//   5. record the installed manifest
-//   6. hand off to game.js (which boots the Emscripten module)
-//
-// GeneralsX @build web-port 05/07/2026 - Web port Phase 1
+// GeneralsX @build web-port 06/07/2026
 
 'use strict';
 
+// GeneralsX @feature Lolendor 22/07/2026 Localize launch-screen runtime messages.
+const gxText = (key, values) => window.gxI18n.t(key, values);
+
 const gxUI = {
-  overlay: null,
-  bar: null,
-  label: null,
-  detail: null,
+  overlay: null, detail: null,
+  dlBar: null, dlVal: null, unBar: null, unVal: null,
+  statusKey: null, statusValues: null,
+  init() {
+    this.overlay = document.getElementById('gx-overlay');
+    this.detail = document.getElementById('gx-detail');
+    this.dlBar = document.getElementById('gx-bar');
+    this.dlVal = document.getElementById('gx-dl-val');
+    this.unBar = document.getElementById('gx-bar2');
+    this.unVal = document.getElementById('gx-un-val');
+    window.addEventListener('gxlanguagechange', () => this.refreshLanguage());
+  },
   error(msg) {
     console.error('[loader]', msg);
     const el = document.getElementById('gx-error');
@@ -29,232 +31,245 @@ const gxUI = {
     el.textContent = msg;
     document.getElementById('gx-progress-wrap').style.display = 'none';
   },
-  progress(done, total, detail) {
+  download(done, total, detail) {
     const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
-    this.bar.style.width = pct + '%';
-    this.label.textContent = pct + '%';
+    this.dlBar.style.width = pct + '%';
+    this.dlVal.textContent = total > 0 ? gxHuman(done) + ' / ' + gxHuman(total) : gxHuman(done);
     if (detail) this.detail.textContent = detail;
   },
-  status(text) {
-    this.detail.textContent = text;
+  unpack(done, total) {
+    const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+    this.unBar.style.width = pct + '%';
+    this.unVal.textContent = done + ' / ' + total;
+  },
+  status(key, values) {
+    this.statusKey = key;
+    this.statusValues = values || null;
+    this.detail.textContent = gxText(key, values);
+  },
+  refreshLanguage() {
+    if (this.statusKey) this.detail.textContent = gxText(this.statusKey, this.statusValues);
   },
 };
 
-function gxHuman(bytes) {
-  if (bytes > 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' ГБ';
-  if (bytes > 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' МБ';
-  if (bytes > 1024) return (bytes / 1024).toFixed(0) + ' КБ';
-  return bytes + ' Б';
+function gxHuman(b) {
+  if (b > 1073741824) return (b / 1073741824).toFixed(2) + ' ' + gxText('unit.gb');
+  if (b > 1048576) return (b / 1048576).toFixed(1) + ' ' + gxText('unit.mb');
+  if (b > 1024) return (b / 1024).toFixed(0) + ' ' + gxText('unit.kb');
+  return b + ' ' + gxText('unit.b');
 }
+
+// ── Stream extraction (worker-driven, resumable) ─────────────────────────
+// The dispatcher worker fetches build.data, slices it at segment boundaries,
+// decompresses segments on a parallel brotli sub-worker pool, and writes files
+// to OPFS in order. The main thread relays progress, persists a resume journal
+// per completed segment, and runs a watchdog: if the worker goes silent for
+// 60 s (deadlock, dropped promise, killed SW...) it is terminated and
+// restarted from the journaled segment — a hang becomes an automatic resume.
+// Returns { files, entries }.
+
+async function gxStreamExtract(url, storage, journalKey) {
+  const ver = (window.gxEngine && window.gxEngine.buildId) || 'dev';
+  const wasmUrl = new URL('brotli_bg.wasm?v=' + ver, document.baseURI).href;
+  const WATCHDOG_MS = 60000;
+  const MAX_RESTARTS = 4;
+
+  let restarts = 0;
+  for (;;) {
+    // Resume state from the journal (OPFS mode only; the worker re-validates
+    // the etag/total before honoring it).
+    let resume = null;
+    if (storage.kind === 'opfs' && journalKey) {
+      const j = await storage.readMeta(journalKey);
+      if (j && Number.isInteger(j.seg) && j.etag)
+        resume = { startSeg: j.seg + 1, etag: j.etag, total: j.total };
+    }
+
+    try {
+      return await gxRunUnpackWorker(url, wasmUrl, storage, journalKey, resume, ver, WATCHDOG_MS);
+    } catch (e) {
+      if (e && e.gxWatchdog && restarts < MAX_RESTARTS) {
+        restarts++;
+        console.warn('[loader] воркер молчал ' + (WATCHDOG_MS / 1000) + 'с — перезапуск ' +
+          restarts + '/' + MAX_RESTARTS + ' с докачкой');
+        gxUI.status('loader.stalled', { attempt: restarts });
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+function gxRunUnpackWorker(url, wasmUrl, storage, journalKey, resume, ver, watchdogMs) {
+  // The workers are tiny — always fetch fresh so a redeploy is never served a
+  // stale cached Worker script. brotli_bg.wasm (~1 MB) is versioned by buildId.
+  const bust = ver + '.' + (Date.now() >>> 0);
+  const worker = new Worker('unpack-worker.js?v=' + bust);
+
+  return new Promise((resolve, reject) => {
+    let watchdog = null;
+    const arm = () => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        try { worker.terminate(); } catch {}
+        const err = new Error('unpack worker silent for ' + watchdogMs + 'ms');
+        err.gxWatchdog = true;
+        reject(err);
+      }, watchdogMs);
+    };
+    const done = (fn) => (v) => { if (watchdog) clearTimeout(watchdog); try { worker.terminate(); } catch {} fn(v); };
+    const ok = done(resolve), fail = done(reject);
+    arm();
+
+    worker.addEventListener('message', (ev) => {
+      const m = ev.data;
+      arm();                                          // any message = alive
+      if (m.type === 'download') {
+        gxUI.download(m.received, m.total);
+      } else if (m.type === 'index') {
+        gxUI.unpack(0, m.entries.length);
+      } else if (m.type === 'progress') {
+        gxUI.unpack(m.done, m.total);
+        if (m.verifying) gxUI.status('loader.verifying');
+      } else if (m.type === 'journal') {
+        // Persist resume state; fire-and-forget (journal loss only costs re-work).
+        if (storage.kind === 'opfs' && journalKey)
+          storage.writeMeta(journalKey, { seg: m.seg, etag: m.etag, total: m.total }).catch(() => {});
+      } else if (m.type === 'reconnect') {
+        gxUI.status('loader.reconnecting', { attempt: m.attempt });
+      } else if (m.type === 'complete') {
+        ok({ files: m.files, entries: m.entries });
+      } else if (m.type === 'error') {
+        fail(new Error(m.message));
+      }
+    });
+    worker.addEventListener('error', (e) => {
+      const where = e.filename ? (' @ ' + e.filename + ':' + e.lineno) : '';
+      console.error('[loader] worker error event:', e);
+      fail(new Error('Worker: ' + (e.message || gxText('error.workerLoad')) + where));
+    });
+    worker.addEventListener('messageerror', (e) => {
+      console.error('[loader] worker messageerror:', e);
+      fail(new Error('Worker: ' + gxText('error.workerMessage')));
+    });
+    worker.postMessage({ type: 'start', url, wasmUrl, mode: storage.kind, resume, ver: bust });
+  });
+}
+
+// ── Checks & init ────────────────────────────────────────────────────────────
 
 async function gxCheckEnvironment() {
   if (!crossOriginIsolated) {
-    // coi-serviceworker.js may be mid-registration: on hosts without
-    // COOP/COEP headers it reloads the page once to inject them.
     if (window.gxCoiPending) {
-      gxUI.status('Настройка окружения (страница перезагрузится)…');
+      gxUI.status('loader.environment');
       await new Promise((r) => setTimeout(r, 4000));
     }
-    if (!crossOriginIsolated) {
-      throw new Error(
-        'SharedArrayBuffer недоступен (нет crossOriginIsolated) — игра не сможет запуститься.\n' +
-        'Причина: страница открыта не по HTTPS/localhost (нужен secure context), либо хостинг не отдаёт ' +
-        'заголовки COOP/COEP и service worker не смог их добавить.\n' +
-        'Решение: откройте сайт по HTTPS. Для доступа по голому IP — опциональный сервер: ' +
-        '"gx-web -dir dist -tls-self-signed" и адрес https://<ip>:8080 (принять предупреждение один раз).'
-      );
-    }
+    if (!crossOriginIsolated) throw new Error(gxText('error.sharedArrayBuffer'));
   }
-  if (typeof WebAssembly === 'undefined') {
-    throw new Error('Браузер не поддерживает WebAssembly.');
-  }
+  if (typeof WebAssembly === 'undefined') throw new Error(gxText('error.webAssembly'));
 }
 
-// Optional editable network config (STUN/TURN + MQTT brokers) from ice.json
-// next to index.html; signaling.js defaults apply when absent/broken.
+// IndexedDB mode: load every stored file into window.gxFiles for the engine
+// (OPFS mode reads the mounted filesystem directly, so this is a no-op there).
+async function gxMaterializeIdb(storage) {
+  const paths = (await storage.listPaths()).filter(k => typeof k === 'string');
+  const assetPaths = paths.filter(k => !k.startsWith('meta/'));
+  const files = [];
+  for (let i = 0; i < assetPaths.length; i++) {
+    files.push({ path: assetPaths[i], data: await storage.readBytes(assetPaths[i]) });
+    if (i % 20 === 0) gxUI.unpack(i, assetPaths.length);
+  }
+  gxUI.unpack(assetPaths.length, assetPaths.length);
+  window.gxFiles = files;
+  window.gxIdbPutUserFile = (path, bytes) => {
+    storage.writeBlob('userdata/' + path, new Blob([bytes])).catch(e =>
+      console.warn('[loader] userdata write-back failed:', path, e));
+  };
+}
+
+// Wipe every browser-side store this app uses: OPFS (game files, meta,
+// userdata), IndexedDB (gx-assets fallback + any others on the origin),
+// Cache Storage, localStorage/sessionStorage settings, and the COI service
+// worker registration. Used by the settings "Очистить все данные" button.
+async function gxWipeAllStorage() {
+  const jobs = [];
+
+  // OPFS: remove every top-level entry.
+  if (navigator.storage && navigator.storage.getDirectory) {
+    jobs.push((async () => {
+      try {
+        const root = await navigator.storage.getDirectory();
+        const names = [];
+        for await (const [name] of root.entries()) names.push(name);
+        for (const name of names) {
+          await root.removeEntry(name, { recursive: true }).catch(() => {});
+        }
+      } catch (e) { console.warn('[wipe] OPFS:', e); }
+    })());
+  }
+
+  // IndexedDB: delete every database on the origin (or at least ours).
+  jobs.push((async () => {
+    try {
+      let names = ['gx-assets'];
+      if (indexedDB.databases) {
+        try {
+          const dbs = await indexedDB.databases();
+          names = dbs.map((d) => d.name).filter(Boolean);
+        } catch {}
+      }
+      await Promise.all(names.map((n) => new Promise((res) => {
+        const req = indexedDB.deleteDatabase(n);
+        req.onsuccess = req.onerror = req.onblocked = () => res();
+      })));
+    } catch (e) { console.warn('[wipe] IDB:', e); }
+  })());
+
+  // Cache Storage (anything a SW or the browser cached under our origin).
+  if (window.caches && caches.keys) {
+    jobs.push((async () => {
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      } catch (e) { console.warn('[wipe] caches:', e); }
+    })());
+  }
+
+  // Service workers (the COI worker re-registers itself on next load).
+  if ('serviceWorker' in navigator) {
+    jobs.push((async () => {
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      } catch (e) { console.warn('[wipe] sw:', e); }
+    })());
+  }
+
+  await Promise.all(jobs);
+
+  // Settings and per-tab identity last (sync, can't fail meaningfully).
+  try { localStorage.clear(); } catch {}
+  try { sessionStorage.clear(); } catch {}
+}
+
 async function gxLoadNetConfig() {
   try {
     const r = await fetch('ice.json', { cache: 'no-cache' });
     if (!r.ok) return;
     const cfg = await r.json();
-    if (cfg && Array.isArray(cfg.iceServers) && cfg.iceServers.length) {
+    if (cfg && Array.isArray(cfg.iceServers) && cfg.iceServers.length)
       window.gxNetConfig.iceServers = cfg.iceServers;
-    }
-    if (cfg && Array.isArray(cfg.mqttBrokers) && cfg.mqttBrokers.length) {
+    if (cfg && Array.isArray(cfg.mqttBrokers) && cfg.mqttBrokers.length)
       window.gxNetConfig.mqttBrokers = cfg.mqttBrokers;
-    }
-    console.log('[loader] сетевой конфиг из ice.json применён');
   } catch (e) {
-    console.warn('[loader] ice.json не прочитан, использую значения по умолчанию:', e);
+    console.warn('[loader] ice.json не прочитан:', e);
   }
 }
 
-// Relative asset URL; the sha fragment busts HTTP caches when a file changes
-// between deploys (the path itself stays stable for static hosting).
-function gxAssetUrl(f) {
-  const encoded = f.path.split('/').map(encodeURIComponent).join('/');
-  return 'assets/files/' + encoded + '?v=' + f.sha256.slice(0, 12);
-}
-
-async function gxSyncAssets(storage, lang) {
-  gxUI.status('Получаю список файлов…');
-  const resp = await fetch('assets/manifest.json', { cache: 'no-cache' });
-  if (!resp.ok) throw new Error('assets/manifest.json недоступен: HTTP ' + resp.status);
-  const manifest = await resp.json();
-
-  const isEnglish = lang !== 'russian';
-  // Language-specific BIGs: allowed set for this language.
-  // English set:
-  //   GameDataGenerals/English.big, GameDataGenerals/AudioEnglish.big,
-  //   GameDataGenerals/SpeechEnglish.big, EnglishZH.big,
-  //   AudioEnglishZH.big, SpeechEnglishZH.big, W3DEnglishZH.big
-  // Russian set:
-  //   GameDataGenerals/0!Russian.big, GameDataGenerals/00Russian.big,
-  //   GameDataGenerals/Audio.big, GameDataGenerals/Speech.big,
-  //   00RussianZH.big, Data/Movies/Russian_VS_small.bik
-  const skipPaths = isEnglish
-    ? ['00RussianZH.big', 'GameDataGenerals/0!Russian.big',
-       'GameDataGenerals/00Russian.big', 'GameDataGenerals/Audio.big',
-       'GameDataGenerals/Speech.big', 'Data/Movies/Russian_VS_small.bik']
-    : ['AudioEnglishZH.big', 'EnglishZH.big', 'SpeechEnglishZH.big',
-       'W3DEnglishZH.big', 'GameDataGenerals/AudioEnglish.big',
-       'GameDataGenerals/English.big', 'GameDataGenerals/SpeechEnglish.big'];
-  const skipSet = new Set(skipPaths);
-  // Build a Set of allowed paths (manifest minus language-specific).
-  const allowed = new Set(manifest.files.filter(f => !skipSet.has(f.path)).map(f => f.path));
-
-  // Step 1: delete stale language files from a previous language selection.
-  // These are specific known paths — no need to walk the full storage tree.
-  const stale = isEnglish
-    ? ['00RussianZH.big', 'GameDataGenerals/0!Russian.big',
-       'GameDataGenerals/00Russian.big', 'GameDataGenerals/Audio.big',
-       'GameDataGenerals/Speech.big', 'Data/Movies/Russian_VS_small.bik']
-    : ['AudioEnglishZH.big', 'EnglishZH.big', 'SpeechEnglishZH.big',
-       'W3DEnglishZH.big', 'GameDataGenerals/AudioEnglish.big',
-       'GameDataGenerals/English.big', 'GameDataGenerals/SpeechEnglish.big'];
-  for (const path of stale) {
-    try {
-      if (await storage.has(path)) {
-        await storage.remove(path);
-      }
-    } catch {}
-  }
-
-  // Step 2: download missing/changed files.
-  const installed = (await storage.readMeta('installed-manifest')) || { files: {} };
-  const installedByPath = installed.files || {};
-
-  const toDownload = [];
-  let totalBytes = 0;
-  for (const f of manifest.files) {
-    if (!allowed.has(f.path)) continue;
-    const have = installedByPath[f.path];
-    if (have && have.sha256 === f.sha256) {
-      const size = await storage.fileSize(f.path);
-      if (size === f.size) continue;
-    }
-    toDownload.push(f);
-    totalBytes += f.size;
-  }
-
-  if (toDownload.length > 0) {
-    const est = await storage.estimate();
-    if (est && est.quota && est.quota - (est.usage || 0) < totalBytes) {
-      throw new Error(
-        'Недостаточно места в хранилище браузера: нужно ' + gxHuman(totalBytes) +
-        ', доступно ' + gxHuman(est.quota - (est.usage || 0)) + '.'
-      );
-    }
-    await storage.requestPersist();
-
-    console.log('[loader] к загрузке: ' + toDownload.length + ' файлов, ' + gxHuman(totalBytes));
-    let done = 0;
-    gxUI.progress(0, totalBytes, 'Загрузка файлов игры: ' + gxHuman(totalBytes));
-
-    const queue = toDownload.slice();
-    const workers = [];
-    const concurrency = Math.min(4, queue.length);
-    for (let i = 0; i < concurrency; i++) {
-      workers.push((async () => {
-        for (;;) {
-          const f = queue.shift();
-          if (!f) return;
-          const url = gxAssetUrl(f);
-          for (let attempt = 1; ; attempt++) {
-            try {
-              const r = await fetch(url);
-              if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + f.path);
-              const written = await storage.writeStream(f.path, r, (n) => {
-                done += n;
-                gxUI.progress(done, totalBytes,
-                  'Загрузка: ' + gxHuman(done) + ' / ' + gxHuman(totalBytes));
-              });
-              if (written !== f.size) throw new Error('размер не совпал: ' + f.path);
-              installedByPath[f.path] = { sha256: f.sha256, size: f.size };
-              break;
-            } catch (e) {
-              console.warn('[loader] попытка ' + attempt + ' не удалась для ' + f.path + ':', e);
-              try { await storage.remove(f.path); } catch {}
-              if (attempt >= 3) throw e;
-            }
-          }
-        }
-      })());
-    }
-    await Promise.all(workers);
-  } else {
-    console.log('[loader] все файлы уже в кеше (' + manifest.files.length + ' шт.)');
-  }
-
-  installed.files = installedByPath;
-  installed.version = manifest.version;
-  await storage.writeMeta('installed-manifest', installed);
-  console.log('[loader] загрузка завершена');
-  return { manifest, allowed };
-}
-
-// IndexedDB mode: the wasm side can't read IDB, so materialize every file as
-// an ArrayBuffer on window.gxFiles; WebMain.cpp copies them into a WASMFS
-// js-file-backend mount at startup (JS memory, not wasm heap).
-async function gxMaterializeForIdb(storage, manifest, allowed) {
-  const targets = allowed ? manifest.files.filter(f => allowed.has(f.path)) : manifest.files;
-  const total = targets.length;
-  gxUI.status('Подготовка файлов (IndexedDB режим)…');
-  const files = [];
-  let done = 0;
-  for (const f of targets) {
-    files.push({ path: f.path, data: await storage.readBytes(f.path) });
-    done++;
-    if (done % 5 === 0 || done === total) {
-      gxUI.progress(done, total, 'Подготовка файлов: ' + done + ' / ' + total);
-    }
-  }
-  // Saved games / options written back by earlier sessions (see
-  // window.gxIdbPutUserFile below) live under 'userdata/' keys.
-  try {
-    const extra = (await storage.listPaths()).filter((k) => typeof k === 'string' && k.startsWith('userdata/'));
-    for (const k of extra) {
-      files.push({ path: k, data: await storage.readBytes(k) });
-    }
-    if (extra.length) console.log('[loader] восстановлено файлов пользователя из IndexedDB:', extra.length);
-  } catch (e) {
-    console.warn('[loader] не удалось восстановить userdata из IndexedDB:', e);
-  }
-  window.gxFiles = files;
-
-  // Write-back sink: WebMain periodically pushes save files here (IDB mode
-  // has no OPFS, so persistence goes through IndexedDB).
-  window.gxIdbPutUserFile = (path, bytes) => {
-    storage.writeBlob('userdata/' + path, new Blob([bytes])).catch((e) =>
-      console.warn('[loader] userdata write-back failed:', path, e));
-  };
-}
+// ── Boot ─────────────────────────────────────────────────────────────────────
 
 async function gxBoot() {
-  gxUI.overlay = document.getElementById('gx-overlay');
-  gxUI.bar = document.getElementById('gx-bar');
-  gxUI.label = document.getElementById('gx-pct');
-  gxUI.detail = document.getElementById('gx-detail');
+  gxUI.init();
 
   try {
     await gxCheckEnvironment();
@@ -266,11 +281,9 @@ async function gxBoot() {
     document.getElementById('gx-storage-kind').textContent =
       storage.kind === 'opfs' ? 'OPFS' : 'IndexedDB (fallback)';
 
-    // Show play button and settings BEFORE downloading anything:
-    // language and FPS settings are persisted in localStorage and read by
-    // game.js; we read them here for the filter and the engine arguments.
+    // Show settings + play immediately
     document.getElementById('gx-progress-wrap').style.display = 'none';
-    gxUI.progress(1, 1, 'Настройте язык и нажмите Играть');
+    gxUI.status('loader.ready');
 
     const btn = document.getElementById('gx-play');
     btn.style.display = 'inline-block';
@@ -281,33 +294,110 @@ async function gxBoot() {
     fpsSel.value = localStorage.getItem('gx-fps') || '30';
     if (![...fpsSel.options].some(o => o.value === fpsSel.value)) fpsSel.value = '30';
     fpsSel.addEventListener('change', () => localStorage.setItem('gx-fps', fpsSel.value));
-    const langSel = document.getElementById('gx-lang');
-    langSel.value = localStorage.getItem('gx-lang') || 'english';
-    if (![...langSel.options].some(o => o.value === langSel.value)) langSel.value = 'english';
-    langSel.addEventListener('change', () => localStorage.setItem('gx-lang', langSel.value));
+
+    const buildSel = document.getElementById('gx-build');
+    buildSel.value = localStorage.getItem('gx-build') || 'default_ru';
+    if (![...buildSel.options].some(o => o.value === buildSel.value)) buildSel.value = 'default_ru';
+    buildSel.addEventListener('change', () => localStorage.setItem('gx-build', buildSel.value));
+
     settingsBtn.style.display = 'inline-block';
     settingsBtn.addEventListener('click', () => { settingsBox.hidden = !settingsBox.hidden; });
 
-    // Wait for Play — language is now locked.
+    // Wipe-everything button: OPFS, IndexedDB, Cache Storage, local/session
+    // storage, and the COI service worker. Two clicks to confirm.
+    const wipeBtn = document.getElementById('gx-wipe');
+    let wipeArmed = false;
+    let wipeTextKey = 'shell.wipe';
+    const renderWipeText = () => { wipeBtn.textContent = gxText(wipeTextKey); };
+    window.addEventListener('gxlanguagechange', renderWipeText);
+    wipeBtn.addEventListener('click', async () => {
+      if (!wipeArmed) {
+        wipeArmed = true;
+        wipeTextKey = 'loader.wipeConfirm';
+        renderWipeText();
+        setTimeout(() => {
+          wipeArmed = false;
+          wipeTextKey = 'shell.wipe';
+          renderWipeText();
+        }, 4000);
+        return;
+      }
+      wipeBtn.disabled = true;
+      wipeTextKey = 'loader.wiping';
+      renderWipeText();
+      try {
+        await gxWipeAllStorage();
+        wipeTextKey = 'loader.wipeDone';
+        renderWipeText();
+        setTimeout(() => location.reload(), 600);
+      } catch (e) {
+        console.error('[loader] wipe failed:', e);
+        wipeBtn.disabled = false;
+        wipeTextKey = 'loader.wipeError';
+        renderWipeText();
+        wipeArmed = false;
+      }
+    });
+
     await new Promise((resolve) => btn.addEventListener('click', resolve, { once: true }));
     btn.style.display = 'none';
     settingsBtn.style.display = 'none';
     settingsBox.hidden = true;
 
-    // NOW sync assets with the chosen language (the user may have changed it
-    // after the last play; gxSyncAssets deletes stale language BIGs first).
-    document.getElementById('gx-progress-wrap').style.display = 'block';
-    gxUI.bar.style.width = '0%';
-    gxUI.label.textContent = '0%';
-    const lang = localStorage.getItem('gx-lang') || 'english';
-    const { manifest, allowed } = await gxSyncAssets(storage, lang);
+    const build = localStorage.getItem('gx-build') || 'default_ru';
+    const markerKey = 'installed-' + build;
 
-    if (storage.kind === 'idb') {
-      await gxMaterializeForIdb(storage, manifest, allowed);
+    // Stage 1: download the engine (wasm) into memory, with progress. Always
+    // needed — done before resources so a fresh install and a cached reload both
+    // fetch the engine here, and the engine never fetches its own wasm later.
+    document.getElementById('gx-progress-wrap').style.display = 'block';
+    gxUI.download(0, 0);
+    gxUI.unpack(0, 0);
+    gxUI.status('loader.engine');
+    await gxPreloadEngine((received, total) => gxUI.download(received, total));
+
+    // Already installed? Skip the resource download/unpack and go straight to play.
+    const marker = await storage.readMeta(markerKey);
+    if (marker && marker.complete) {
+      console.log('[loader] сборка ' + build + ' уже установлена (' + marker.files + ' файлов) — пропускаю загрузку');
+      if (storage.kind === 'idb') {
+        gxUI.status('loader.files');
+        await gxMaterializeIdb(storage);
+      }
+      gxUI.status('loader.starting');
+      document.getElementById('gx-progress-wrap').style.display = 'none';
+      await gxStartGame();
+      gxUI.overlay.style.display = 'none';
+      return;
     }
 
+    // Stage 2: download + unpack game resources.
+    gxUI.download(0, 0);
+    gxUI.unpack(0, 0);
+
+    // The dispatcher worker fetches, slices segments, decompresses them on a
+    // parallel pool, and writes files — download and unpack run concurrently.
+    // NOTE: a STABLE url (no cache-buster) so Range resume across page reloads
+    // targets the same resource; freshness is validated by the server ETag in
+    // the resume journal.
+    const url = 'assets/' + encodeURIComponent(build) + '/build.data';
+    const journalKey = 'unpack-journal-' + build;
+    gxUI.status('loader.assets');
+    const result = await gxStreamExtract(url, storage, journalKey);
+    console.log('[loader] распаковано ' + result.files + ' файлов');
+
+    // IndexedDB mode: materialize files into window.gxFiles for the engine.
+    if (storage.kind === 'idb') {
+      gxUI.status('loader.files');
+      await gxMaterializeIdb(storage);
+    }
+
+    // Mark installed; drop the resume journal (it's for interrupted installs).
+    await storage.writeMeta(markerKey, { complete: true, files: result.files, ts: Date.now() });
+    if (storage.kind === 'opfs') await storage.writeMeta(journalKey, {}).catch(() => {});
+
+    gxUI.status('loader.starting');
     document.getElementById('gx-progress-wrap').style.display = 'none';
-    gxUI.status('Запуск движка…');
     await gxStartGame();
     gxUI.overlay.style.display = 'none';
   } catch (e) {

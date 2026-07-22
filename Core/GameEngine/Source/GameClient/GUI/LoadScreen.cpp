@@ -139,6 +139,71 @@ FRAME_RIGHT_VOICE = 140,
 
 static const Int TELETYPE_UPDATE_FREQ = 2; // how many frames between teletype updates
 
+#ifdef __EMSCRIPTEN__
+// GeneralsX @build web-port 09/07/2026 Load-screen frame pump (v2, glReadPixels).
+// The engine draws its ORIGINAL load screen into the OffscreenCanvas from the
+// blocked game pthread, but browsers only composite OffscreenCanvas frames
+// when the worker yields - which the synchronous map load never does, so the
+// real load screen rendered into the void.
+//
+// v1 used canvas.transferToImageBitmap(): it delivered frames, but DETACHES
+// the OffscreenCanvas buffer, which breaks emscripten's canvas-size bookkeeping
+// (GL.offscreenCanvases) - the next Emscripten_HandleResize crashed with
+// "Cannot read properties of null" in setCanvasElementSizeCallingThread and the
+// display never recovered (permanent black screen, observed in MP logs).
+//
+// v2 is non-destructive: glReadPixels (synchronous, legal on the blocked
+// context-owning thread) copies the just-rendered backbuffer, and the pixels
+// go to the main thread by simple copy out of the wasm heap; the overlay
+// canvas putImageData()s them. ~4 MB per 1080p frame at <=15 fps, only while
+// loading. The game canvas is never touched.
+#include <emscripten.h>
+#include <emscripten/threading.h>
+#include <GLES3/gl3.h>
+static void gxWebPumpLoadFrame(void)
+{
+	static double s_lastPump = 0.0;
+	static unsigned char *s_buf = nullptr;
+	static int s_bufW = 0, s_bufH = 0;
+	const double now = emscripten_get_now();
+	if (now - s_lastPump < 33.0) return;   // ~30 fps (mission intro movies play in this path)
+	s_lastPump = now;
+
+	GLint vp[4] = {0, 0, 0, 0};
+	glGetIntegerv(GL_VIEWPORT, vp);
+	const int w = vp[2], h = vp[3];
+	if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
+	if (!s_buf || s_bufW != w || s_bufH != h) {
+		free(s_buf);
+		s_buf = (unsigned char *)malloc((size_t)w * h * 4);
+		s_bufW = w; s_bufH = h;
+		if (!s_buf) return;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);   // read the default backbuffer
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, s_buf);
+
+	// Ship a copy to the main thread. HEAPU8.slice() copies out of the (shared)
+	// wasm heap; ImageData wants un-premultiplied RGBA which is what GL gives.
+	MAIN_THREAD_EM_ASM({
+		if (window.gxLoadScreen) {
+			var px = HEAPU8.slice($0, $0 + $1 * $2 * 4);
+			window.gxLoadScreen.frameRGBA(px, $1, $2);
+		}
+	}, s_buf, w, h);
+}
+static void gxWebLoadScreenBegin(void)
+{
+	MAIN_THREAD_EM_ASM({ if (window.gxLoadScreen) window.gxLoadScreen.begin(); });
+}
+static void gxWebLoadScreenEnd(void)
+{
+	MAIN_THREAD_EM_ASM({ if (window.gxLoadScreen) window.gxLoadScreen.end(); });
+}
+#else
+#define gxWebPumpLoadFrame()    ((void)0)
+#define gxWebLoadScreenBegin()  ((void)0)
+#define gxWebLoadScreenEnd()    ((void)0)
+#endif
 
 
 //-----------------------------------------------------------------------------
@@ -154,6 +219,9 @@ LoadScreen::~LoadScreen()
 {
 	if(m_loadScreen)
 		TheWindowManager->winDestroy( m_loadScreen );
+	// GeneralsX @build web-port 09/07/2026 Hide the DOM mirror when any load
+	// screen goes away (all subclasses funnel through this destructor).
+	gxWebLoadScreenEnd();
 }
 
 void LoadScreen::update( Int percent )
@@ -166,6 +234,10 @@ void LoadScreen::update( Int percent )
 	TheDisplay->update();
 	// redraw all views, update the GUI
 	TheDisplay->draw();
+
+	// GeneralsX @build web-port 09/07/2026 Ship the just-rendered load-screen
+	// frame to the visible canvas (the blocked pthread can't present itself).
+	gxWebPumpLoadFrame();
 
 	setFPMode();
 }
@@ -375,6 +447,7 @@ void SinglePlayerLoadScreen::moveWindows( Int frame )
 
 void SinglePlayerLoadScreen::init( GameInfo *game )
 {
+	gxWebLoadScreenBegin();
 	//No music in SinglePlayerLoadScreen
 
 	// create the layout of the load screen
@@ -588,6 +661,7 @@ void SinglePlayerLoadScreen::init( GameInfo *game )
 
 			// redraw all views, update the GUI
 			TheDisplay->draw();
+			gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 		}
 
 #if !RTS_GENERALS
@@ -596,6 +670,7 @@ void SinglePlayerLoadScreen::init( GameInfo *game )
 		m_videoStream = nullptr;
 		m_loadScreen->winGetInstanceData()->setVideoBuffer( nullptr );
 		TheDisplay->draw();
+		gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 #endif
 	}
 	else
@@ -642,6 +717,7 @@ void SinglePlayerLoadScreen::init( GameInfo *game )
 
 			TheWindowManager->update();
 			TheDisplay->draw();
+			gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 			Sleep(100);
 			currTime = timeGetTime();
 		}
@@ -649,6 +725,7 @@ void SinglePlayerLoadScreen::init( GameInfo *game )
 
 		TheWindowManager->update();
 		TheDisplay->draw();
+		gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 
 	}
 	setFPMode();
@@ -932,6 +1009,7 @@ void ChallengeLoadScreen::activatePiecesMinSpec(const GeneralPersona *generalPla
 
 void ChallengeLoadScreen::init( GameInfo *game )
 {
+	gxWebLoadScreenBegin();
 	const Campaign *campaign = TheCampaignManager->getCurrentCampaign();
 	const Mission *mission = TheCampaignManager->getCurrentMission();
 
@@ -1108,6 +1186,7 @@ void ChallengeLoadScreen::init( GameInfo *game )
 
 			// redraw all views, update the GUI
 			TheDisplay->draw();
+			gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 
 			TheAudio->update();
 		}
@@ -1147,6 +1226,7 @@ void ChallengeLoadScreen::init( GameInfo *game )
 
 			TheWindowManager->update();
 			TheDisplay->draw();
+			gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 			Sleep(100);
 			currTime = timeGetTime();
 		}
@@ -1154,6 +1234,7 @@ void ChallengeLoadScreen::init( GameInfo *game )
 		m_wndVideoManager->update();
 		TheWindowManager->update();
 		TheDisplay->draw();
+		gxWebPumpLoadFrame();   // web: present this movie/load frame (blocked pthread cannot)
 	}
 	setFPMode();
 
@@ -1201,6 +1282,7 @@ ShellGameLoadScreen::~ShellGameLoadScreen()
 
 void ShellGameLoadScreen::init( GameInfo *game )
 {
+	gxWebLoadScreenBegin();
 	static BOOL firstLoad = TRUE;
 
 
@@ -1276,6 +1358,7 @@ MultiPlayerLoadScreen::~MultiPlayerLoadScreen()
 
 void MultiPlayerLoadScreen::init( GameInfo *game )
 {
+	gxWebLoadScreenBegin();
 	// create the layout of the load screen
 	m_loadScreen = TheWindowManager->winCreateFromScript( "Menus/MultiplayerLoadScreen.wnd" );
 	DEBUG_ASSERTCRASH(m_loadScreen, ("Can't initialize the Multiplayer loadscreen"));
@@ -1539,6 +1622,7 @@ extern Int GetAdditionalDisconnectsFromUserFile(Int playerID);
 
 void GameSpyLoadScreen::init( GameInfo *game )
 {
+	gxWebLoadScreenBegin();
 	// create the layout of the load screen
 	m_loadScreen = TheWindowManager->winCreateFromScript( "Menus/GameSpyLoadScreen.wnd" );
 	DEBUG_ASSERTCRASH(m_loadScreen, ("Can't initialize the Multiplayer loadscreen"));
@@ -1881,6 +1965,7 @@ MapTransferLoadScreen::~MapTransferLoadScreen()
 
 void MapTransferLoadScreen::init( GameInfo *game )
 {
+	gxWebLoadScreenBegin();
 	// create the layout of the load screen
 	m_loadScreen = TheWindowManager->winCreateFromScript( "Menus/MapTransferScreen.wnd" );
 	DEBUG_ASSERTCRASH(m_loadScreen, ("Can't initialize the map transfer loadscreen"));

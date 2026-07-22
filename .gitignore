@@ -100,3 +100,9 @@ ios/GeneralsXZH.xcodeproj/
 # Web port build artifacts (assembled by scripts/web/make-dist.sh)
 web/dist/
 web/gamedata/
+
+# Web shell npm deps (brotli-wasm source; bundled outputs are committed)
+web/shell/node_modules/
+
+# Web packer segment cache (content-hash -> compressed segment)
+web/.pack-cache/

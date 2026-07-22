@@ -654,6 +654,22 @@ void SDL3GameEngine::pollSDL3Events(void)
 
 			case SDL_EVENT_KEY_DOWN:
 			case SDL_EVENT_KEY_UP:
+#ifdef __EMSCRIPTEN__
+				// GeneralsX @bugfix web-port 09/07/2026 Self-healing focus: after
+				// repeated tab minimize/restore cycles the browser can deliver a
+				// blur without a matching focus, leaving m_IsActive=false and the
+				// mouse capture blocked forever ("controls stopped working" while
+				// the game itself kept running). Real input arriving IS proof of
+				// focus - recover on the spot instead of waiting for an event
+				// that may never come.
+				if (!m_IsActive && event.type == SDL_EVENT_KEY_DOWN) {
+					m_IsActive = true;
+					if (TheMouse) {
+						TheMouse->regainFocus();
+						TheMouse->refreshCursorCapture();
+					}
+				}
+#endif
 				// Fighter19 pattern: direct addSDLEvent() call
 				// GeneralsX @refactor felipebraz 16/02/2026 Simplified event routing
 				if (TheKeyboard) {
@@ -662,6 +678,27 @@ void SDL3GameEngine::pollSDL3Events(void)
 						keyboard->addSDLEvent(&event);
 					}
 				}
+#ifdef __EMSCRIPTEN__
+				// GeneralsX @build web-port 08/07/2026 Browsers never deliver
+				// Enter/Return through the text-input (SDL_EVENT_TEXT_INPUT) path
+				// - it is a key event only. GadgetTextEntry finishes an edit (send
+				// chat, confirm name) on GWM_IME_CHAR == VK_RETURN, which native
+				// platforms get from the OS IME. Synthesize that here from the
+				// Return key-down so chat/name entry fields submit.
+				if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+				    (event.key.scancode == SDL_SCANCODE_RETURN ||
+				     event.key.scancode == SDL_SCANCODE_KP_ENTER)) {
+					GameWindow* entry = m_TextInputFocusWindow;
+					if (entry && TheWindowManager &&
+					    BitIsSet(entry->winGetStyle(), GWS_ENTRY_FIELD)) {
+						// VK_RETURN (0x0D): GadgetTextEntry's GWM_IME_CHAR handler
+						// sends GEM_EDIT_DONE on this exact value.
+						const WindowMsgData GX_VK_RETURN = 0x0D;
+						TheWindowManager->winSendInputMsg(entry, GWM_IME_CHAR,
+							GX_VK_RETURN, 0);
+					}
+				}
+#endif
 				break;
 
 			case SDL_EVENT_TEXT_INPUT:
@@ -672,6 +709,18 @@ void SDL3GameEngine::pollSDL3Events(void)
 			case SDL_EVENT_MOUSE_BUTTON_DOWN:
 			case SDL_EVENT_MOUSE_BUTTON_UP:
 			case SDL_EVENT_MOUSE_WHEEL:
+#ifdef __EMSCRIPTEN__
+				// Self-healing focus (see the key-event twin above): a real click
+				// proves the tab is focused even if the browser's focus event got
+				// lost across minimize/restore churn.
+				if (!m_IsActive && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+					m_IsActive = true;
+					if (TheMouse) {
+						TheMouse->regainFocus();
+						TheMouse->refreshCursorCapture();
+					}
+				}
+#endif
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 				// Belt-and-braces: drop SDL's own touch-synthesized mouse events.
 				// The gesture translator owns all touch->mouse conversion; double

@@ -516,6 +516,17 @@ void SidesList::prepareForMP_or_Skirmish()
 			gotScripts = true;
 		}
 	}
+#if defined(ALLOW_DEBUG_UTILS) || defined(__EMSCRIPTEN__)
+	fprintf(stderr, "[SKIRMISH_DIAG] prepareForMP_or_Skirmish: skirmishSides=%d gotScripts=%d\n",
+		m_numSkirmishSides, (int)gotScripts);
+	for (Int di = 0; di < m_numSkirmishSides; di++) {
+		AsciiString dn = m_skirmishSides[di].getDict()->getAsciiString(TheKey_playerName);
+		AsciiString df = m_skirmishSides[di].getDict()->getAsciiString(TheKey_playerFaction);
+		fprintf(stderr, "[SKIRMISH_DIAG]   side %d name='%s' faction='%s'\n",
+			di, dn.str(), df.str());
+	}
+	fflush(stderr);
+#endif
 	if (!gotScripts) {
 		// GeneralsX @bugfix Copilot 22/03/2026 Load default skirmish scripts relative to the configured asset root.
 		AsciiString path = "Data\\Scripts\\SkirmishScripts.scb";
@@ -528,7 +539,7 @@ void SidesList::prepareForMP_or_Skirmish()
 		m_skirmishTeamrec.clear();
 		CachedFileInputStream theInputStream;
 		if (theInputStream.open(path)) {
-#ifdef ALLOW_DEBUG_UTILS
+#if defined(ALLOW_DEBUG_UTILS) || defined(__EMSCRIPTEN__)
 				fprintf(stderr, "[SKIRMISH_DIAG] Opened SkirmishScripts.scb successfully\n");
 				fflush(stderr);
 #endif
@@ -538,7 +549,7 @@ void SidesList::prepareForMP_or_Skirmish()
 				file.registerParser( "ScriptsPlayers", AsciiString::TheEmptyString, ParsePlayersDataChunk );
 				file.registerParser( "ScriptTeams", AsciiString::TheEmptyString, ParseTeamsDataChunk );
 				if (!file.parse(this)) {
-#ifdef ALLOW_DEBUG_UTILS
+#if defined(ALLOW_DEBUG_UTILS) || defined(__EMSCRIPTEN__)
 					fprintf(stderr, "[SKIRMISH_DIAG] ERROR parsing SkirmishScripts.scb\n");
 					fflush(stderr);
 #endif
@@ -547,7 +558,7 @@ void SidesList::prepareForMP_or_Skirmish()
 				}
 				ScriptList *scripts[MAX_PLAYER_COUNT];
 				Int count = ScriptList::getReadScripts(scripts);
-#ifdef ALLOW_DEBUG_UTILS
+#if defined(ALLOW_DEBUG_UTILS) || defined(__EMSCRIPTEN__)
 				fprintf(stderr, "[SKIRMISH_DIAG] Parsed SkirmishScripts.scb scriptCount=%d\n", count);
 				fflush(stderr);
 #endif
@@ -564,11 +575,21 @@ void SidesList::prepareForMP_or_Skirmish()
 					}
 					if (curSide == -1)
 					{
+#if defined(ALLOW_DEBUG_UTILS) || defined(__EMSCRIPTEN__)
+						fprintf(stderr, "[SKIRMISH_DIAG] script[%d] player='%s' matched NO side — dropped\n",
+							i, static_readPlayerNames[i].str());
+						fflush(stderr);
+#endif
 						deleteInstance(scripts[i]);
 						scripts[i] = nullptr;
 						continue;
 					}
 
+#if defined(ALLOW_DEBUG_UTILS) || defined(__EMSCRIPTEN__)
+					fprintf(stderr, "[SKIRMISH_DIAG] script[%d] player='%s' -> side %d\n",
+						i, static_readPlayerNames[i].str(), curSide);
+					fflush(stderr);
+#endif
 					deleteInstance(getSkirmishSideInfo(curSide)->getScriptList());
 					getSkirmishSideInfo(curSide)->setScriptList(scripts[i]);
 					scripts[i] = nullptr;
@@ -577,7 +598,7 @@ void SidesList::prepareForMP_or_Skirmish()
 					static_readPlayerNames[i].clear();
 				}
 		} else {
-#ifdef ALLOW_DEBUG_UTILS
+#if defined(ALLOW_DEBUG_UTILS) || defined(__EMSCRIPTEN__)
 			fprintf(stderr, "[SKIRMISH_DIAG] FAILED to open SkirmishScripts.scb path='%s'\n", path.str());
 			fflush(stderr);
 #endif

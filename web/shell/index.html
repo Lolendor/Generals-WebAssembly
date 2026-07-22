@@ -20,18 +20,41 @@
     background: radial-gradient(ellipse at center, #16202b 0%, #0b0e11 100%);
     text-align: center; padding: 24px;
   }
+  /* GeneralsX @feature Lolendor 22/07/2026 Add a flag language switch to the launch screen. */
+  #gx-language-switch {
+    position: absolute; top: 16px; right: 18px;
+    width: 46px; height: 34px; padding: 5px; cursor: pointer;
+    color: inherit; background: rgba(29, 39, 51, .7);
+    border: 1px solid #2c3a4a; border-radius: 6px;
+    line-height: 1; opacity: .8;
+  }
+  #gx-language-switch img {
+    display: block; width: 34px; height: 22px; object-fit: cover;
+    border-radius: 2px; box-shadow: 0 0 0 1px rgba(255, 255, 255, .22);
+  }
+  #gx-language-switch:hover { background: #253242; opacity: 1; }
+  #gx-language-switch:focus-visible { outline: 2px solid #e8b64c; outline-offset: 3px; }
   #gx-title { font-size: 28px; letter-spacing: 2px; margin-bottom: 8px; color: #e8b64c; }
   #gx-sub { font-size: 13px; opacity: .6; margin-bottom: 40px; }
   #gx-progress-wrap { width: min(520px, 80vw); }
-  #gx-track {
-    width: 100%; height: 14px; border-radius: 7px;
+  .gx-prog { margin-bottom: 14px; }
+  .gx-prog:last-child { margin-bottom: 0; }
+  .gx-prog-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; margin-bottom: 5px; opacity: .8;
+  }
+  .gx-prog-head .gx-lbl { letter-spacing: .5px; }
+  .gx-prog-head .gx-val { font-variant-numeric: tabular-nums; opacity: .7; }
+  #gx-track, #gx-track2 {
+    width: 100%; height: 12px; border-radius: 6px;
     background: #1d2733; overflow: hidden; border: 1px solid #2c3a4a;
   }
-  #gx-bar {
+  #gx-bar, #gx-bar2 {
     width: 0%; height: 100%;
     background: linear-gradient(90deg, #b9821f, #e8b64c);
     transition: width .15s linear;
   }
+  #gx-bar2 { background: linear-gradient(90deg, #2f7d5b, #4fce8f); }
   #gx-pct { margin-top: 10px; font-size: 15px; }
   #gx-detail { margin-top: 6px; font-size: 12px; opacity: .65; min-height: 16px; }
   #gx-storage-kind { font-size: 11px; opacity: .4; margin-top: 18px; }
@@ -59,52 +82,159 @@
     color: #d8dee6; background: #1d2733; border: 1px solid #2c3a4a; border-radius: 4px;
   }
   #gx-settings-note { margin-top: 8px; font-size: 11px; opacity: .5; }
+  #gx-wipe {
+    display: block; width: 100%; margin-top: 12px; padding: 8px;
+    font-size: 12px; cursor: pointer; border-radius: 5px;
+    color: #f0b0b0; background: #2a1616; border: 1px solid #7c3a3a;
+  }
+  #gx-wipe:hover { background: #3a1d1d; }
+  #gx-wipe-note { margin-top: 6px; font-size: 10px; opacity: .45; line-height: 1.4; }
   #gx-error {
     display: none; margin-top: 24px; max-width: min(640px, 85vw);
     padding: 14px 18px; border: 1px solid #7c3a3a; border-radius: 6px;
     background: #2a1616; color: #f0b0b0; font-size: 13px; line-height: 1.5;
     white-space: pre-wrap; text-align: left;
   }
+  /* GeneralsX @feature Lolendor 22/07/2026 Credit the WebAssembly project on the launch screen. */
+  .footer-credit {
+    position: absolute; bottom: 18px; left: 24px; right: 24px;
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 12px;
+    font-size: 12px; color: rgba(216, 222, 230, .55);
+  }
+  .footer-credit .gh-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: #d8dee6; text-decoration: none; opacity: .75;
+  }
+  .footer-credit .gh-link:hover { color: #e8b64c; opacity: 1; }
+  .footer-credit .gh-link:focus-visible { outline: 2px solid #e8b64c; outline-offset: 3px; }
+  .footer-author, .footer-license { white-space: nowrap; }
+  .footer-author::before, .footer-license::before { content: "\00b7"; margin-right: 12px; }
+  @media (max-width: 480px) {
+    .footer-credit { bottom: 12px; font-size: 11px; gap: 5px 10px; }
+    .footer-author::before { content: none; margin-right: 0; }
+  }
+  /* Floating multiplayer panel (over the running game canvas) */
+  #gx-mp {
+    position: fixed; top: 10px; right: 10px; z-index: 20;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  #gx-mp-toggle {
+    padding: 6px 14px; font-size: 12px; letter-spacing: .5px; cursor: pointer;
+    color: #0b0e11; background: linear-gradient(180deg, #e8b64c, #b9821f);
+    border: none; border-radius: 5px; font-weight: 700; opacity: .85;
+  }
+  #gx-mp-toggle:hover { opacity: 1; }
+  #gx-mp-panel {
+    margin-top: 6px; width: 260px; padding: 14px;
+    background: rgba(19,27,36,.97); border: 1px solid #2c3a4a; border-radius: 8px;
+    color: #d8dee6; font-size: 13px; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  }
+  #gx-mp-panel[hidden] { display: none; }
+  #gx-mp-panel h4 { margin: 0 0 10px; font-size: 13px; color: #e8b64c; letter-spacing: 1px; }
+  #gx-mp-panel .row { display: flex; gap: 6px; margin-bottom: 8px; }
+  #gx-mp-panel button {
+    flex: 1; padding: 8px; font-size: 12px; cursor: pointer;
+    color: #d8dee6; background: #1d2733; border: 1px solid #2c3a4a; border-radius: 5px;
+  }
+  #gx-mp-panel button:hover { background: #253242; }
+  #gx-mp-panel input {
+    width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 8px;
+    font-size: 14px; letter-spacing: 2px; text-align: center; text-transform: uppercase;
+    color: #e8b64c; background: #0f1620; border: 1px solid #2c3a4a; border-radius: 5px;
+  }
+  #gx-mp-key {
+    font-size: 20px; letter-spacing: 3px; text-align: center; color: #e8b64c;
+    margin: 8px 0; user-select: all; cursor: copy;
+  }
+  #gx-mp-status { font-size: 11px; opacity: .75; margin-top: 8px; min-height: 28px; line-height: 1.4; }
+  #gx-mp-peers { font-size: 11px; opacity: .6; margin-top: 4px; }
 </style>
 </head>
 <body>
-<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<canvas id="canvas" tabindex="0" style="outline:none" oncontextmenu="event.preventDefault()"></canvas>
+
+<div id="gx-mp" hidden>
+  <button id="gx-mp-toggle" type="button">Сетевая игра</button>
+  <div id="gx-mp-panel" hidden>
+    <h4>СЕТЕВАЯ ИГРА</h4>
+    <div class="row">
+      <button id="gx-mp-host" type="button">Создать</button>
+      <button id="gx-mp-join" type="button">Войти</button>
+    </div>
+    <div id="gx-mp-hostbox" hidden>
+      <div style="font-size:11px;opacity:.6">Код комнаты (передайте игрокам):</div>
+      <div id="gx-mp-key">—</div>
+    </div>
+    <div id="gx-mp-joinbox" hidden>
+      <input id="gx-mp-keyinput" maxlength="9" placeholder="XXXX-XXXX" />
+      <button id="gx-mp-connect" type="button" style="width:100%">Подключиться</button>
+    </div>
+    <div id="gx-mp-status">Не подключено.</div>
+    <div id="gx-mp-peers"></div>
+  </div>
+</div>
 
 <div id="gx-overlay">
+  <button id="gx-language-switch" type="button" aria-label="Switch language">
+    <img id="gx-language-flag" src="i18n/flags/us.svg" width="34" height="22" alt="" draggable="false">
+  </button>
   <div id="gx-title">C&amp;C GENERALS: ZERO HOUR</div>
-  <div id="gx-sub">веб-версия &middot; wasm + WebGL2</div>
+  <div id="gx-sub" data-i18n="shell.subtitle">веб-версия &middot; wasm + WebGL2</div>
   <div id="gx-progress-wrap">
-    <div id="gx-track"><div id="gx-bar"></div></div>
-    <div id="gx-pct">0%</div>
+    <div class="gx-prog">
+      <div class="gx-prog-head"><span class="gx-lbl" data-i18n="shell.download">Загрузка</span><span class="gx-val" id="gx-dl-val">0%</span></div>
+      <div id="gx-track"><div id="gx-bar"></div></div>
+    </div>
+    <div class="gx-prog">
+      <div class="gx-prog-head"><span class="gx-lbl" data-i18n="shell.unpack">Распаковка</span><span class="gx-val" id="gx-un-val">0%</span></div>
+      <div id="gx-track2"><div id="gx-bar2"></div></div>
+    </div>
   </div>
-  <div id="gx-detail">Инициализация…</div>
-  <button id="gx-play">Играть</button>
-  <button id="gx-settings-btn" type="button">Настройки</button>
+  <div id="gx-detail" data-i18n="shell.initializing">Инициализация…</div>
+  <button id="gx-play" data-i18n="shell.play">Играть</button>
+  <button id="gx-settings-btn" type="button" data-i18n="shell.settings">Настройки</button>
   <div id="gx-settings" hidden>
-    <label>Лимит FPS:
+    <label><span data-i18n="shell.fpsLimit">Лимит FPS:</span>
       <select id="gx-fps">
-        <option value="30">30 (оригинал)</option>
+        <option value="30" data-i18n="shell.original">30 (оригинал)</option>
         <option value="60">60</option>
         <option value="90">90</option>
         <option value="120">120</option>
         <option value="144">144</option>
       </select>
     </label>
-    <label>Язык:
-      <select id="gx-lang">
-        <option value="english">English</option>
-        <option value="russian">Русский</option>
+    <label><span data-i18n="shell.build">Сборка:</span>
+      <select id="gx-build">
+        <option value="default_ru">default_ru (Generals ZH)</option>
       </select>
     </label>
-    <div id="gx-settings-note">Сохраняется в браузере; применяется при запуске игры.</div>
+    <div id="gx-settings-note" data-i18n="shell.settingsNote">Сохраняется в браузере; применяется при запуске игры.</div>
+    <button id="gx-wipe" type="button" data-i18n="shell.wipe">Очистить все данные</button>
+    <div id="gx-wipe-note" data-i18n="shell.wipeNote">Удаляет скачанные ресурсы, сейвы и настройки (OPFS, IndexedDB, кэши). Понадобится полная перезагрузка ресурсов.</div>
   </div>
   <div id="gx-error"></div>
   <div id="gx-storage-kind"></div>
+  <span class="footer-credit">
+    <a href="https://github.com/Lolendor/Generals-WebAssembly" target="_blank" rel="noopener noreferrer" class="gh-link">
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      Lolendor/Generals-WebAssembly
+    </a>
+    <span class="footer-author" data-i18n="shell.author">Автор: Lolendor</span>
+    <span class="footer-license">GPL-3.0</span>
+  </span>
 </div>
 
 <script src="coi-serviceworker.js"></script>
+<script src="brotli.min.js"></script>
+<script src="i18n/ru.js"></script>
+<script src="i18n/en.js"></script>
+<script src="i18n/i18n.js"></script>
 <script src="storage.js"></script>
 <script src="signaling.js"></script>
+<script src="netbridge.js"></script>
+<script src="loadscreen.js"></script>
+<script src="lobby.js"></script>
+<script src="mp-ui.js"></script>
 <script src="game.js"></script>
 <script src="loader.js"></script>
 </body>

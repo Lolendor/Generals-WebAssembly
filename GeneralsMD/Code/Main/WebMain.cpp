@@ -463,22 +463,7 @@ int main(int argc, char* argv[])
 		// swscale contexts before FFmpegFile::open() runs, so set it here.
 		av_log_set_level(16);
 
-		// Loader language setting (Module.gxLang -> CNC_ZH_LANGUAGE env var).
-		// GetStringFromRegistry() checks this env var before auto-detection.
-		// Note: all language BIGs store their CSF under Data\English\ (they
-		// override the English path), so NEVER use %s in g_csfFile.
-		{
-			const int langIdx = MAIN_THREAD_EM_ASM_INT({
-				return (typeof Module !== 'undefined' && Module.gxLang === 'russian') ? 1 : 0;
-			});
-			setenv("CNC_ZH_LANGUAGE", langIdx ? "russian" : "english", 1);
-			fprintf(stderr, "INFO: language set to %s\n", langIdx ? "russian" : "english");
-			// All language packs put their CSF at Data\English\generals.csf
-			// in the BIG (they override the English path). The %s in the
-			// default path would look under data/<lang>/ which doesn't exist
-			// for any non-English language. Force the fixed path.
-			g_csfFile = "data/english/generals.csf";
-		}
+
 
 		// Loader FPS setting (Module.gxFps): enforced each frame in
 		// gxWebPeriodic() through FramePacer's render/logic decoupling.
