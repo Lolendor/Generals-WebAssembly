@@ -50,7 +50,8 @@ async function gxDetectStorage() {
     const db = await IdbStorage.open();
     return db;
   }
-  throw new Error('Ни OPFS, ни IndexedDB недоступны — хранилище для файлов игры отсутствует.');
+  // GeneralsX @feature Lolendor 22/07/2026 Localize launch-screen storage errors.
+  throw new Error(window.gxI18n.t('error.storage'));
 }
 
 // ---------------------------------------------------------------------------

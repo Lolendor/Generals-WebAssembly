@@ -24,7 +24,8 @@ async function gxPreloadEngine(onProgress) {
   window.gxEngine.buildId = buildId;
 
   const resp = await fetch('GeneralsXZH.wasm?v=' + buildId);
-  if (!resp.ok) throw new Error('Движок недоступен: HTTP ' + resp.status);
+  // GeneralsX @feature Lolendor 22/07/2026 Localize launch-screen engine errors.
+  if (!resp.ok) throw new Error(window.gxI18n.t('error.engineHttp', { status: resp.status }));
   const total = parseInt(resp.headers.get('Content-Length') || '0') || 0;
 
   const reader = resp.body.getReader();

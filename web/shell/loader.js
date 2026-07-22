@@ -8,9 +8,13 @@
 
 'use strict';
 
+// GeneralsX @feature Lolendor 22/07/2026 Localize launch-screen runtime messages.
+const gxText = (key, values) => window.gxI18n.t(key, values);
+
 const gxUI = {
   overlay: null, detail: null,
   dlBar: null, dlVal: null, unBar: null, unVal: null,
+  statusKey: null, statusValues: null,
   init() {
     this.overlay = document.getElementById('gx-overlay');
     this.detail = document.getElementById('gx-detail');
@@ -18,6 +22,7 @@ const gxUI = {
     this.dlVal = document.getElementById('gx-dl-val');
     this.unBar = document.getElementById('gx-bar2');
     this.unVal = document.getElementById('gx-un-val');
+    window.addEventListener('gxlanguagechange', () => this.refreshLanguage());
   },
   error(msg) {
     console.error('[loader]', msg);
@@ -37,14 +42,21 @@ const gxUI = {
     this.unBar.style.width = pct + '%';
     this.unVal.textContent = done + ' / ' + total;
   },
-  status(text) { this.detail.textContent = text; },
+  status(key, values) {
+    this.statusKey = key;
+    this.statusValues = values || null;
+    this.detail.textContent = gxText(key, values);
+  },
+  refreshLanguage() {
+    if (this.statusKey) this.detail.textContent = gxText(this.statusKey, this.statusValues);
+  },
 };
 
 function gxHuman(b) {
-  if (b > 1073741824) return (b / 1073741824).toFixed(2) + ' ГБ';
-  if (b > 1048576) return (b / 1048576).toFixed(1) + ' МБ';
-  if (b > 1024) return (b / 1024).toFixed(0) + ' КБ';
-  return b + ' Б';
+  if (b > 1073741824) return (b / 1073741824).toFixed(2) + ' ' + gxText('unit.gb');
+  if (b > 1048576) return (b / 1048576).toFixed(1) + ' ' + gxText('unit.mb');
+  if (b > 1024) return (b / 1024).toFixed(0) + ' ' + gxText('unit.kb');
+  return b + ' ' + gxText('unit.b');
 }
 
 // ── Stream extraction (worker-driven, resumable) ─────────────────────────
@@ -80,7 +92,7 @@ async function gxStreamExtract(url, storage, journalKey) {
         restarts++;
         console.warn('[loader] воркер молчал ' + (WATCHDOG_MS / 1000) + 'с — перезапуск ' +
           restarts + '/' + MAX_RESTARTS + ' с докачкой');
-        gxUI.status('Загрузка зависла — перезапуск с докачкой (' + restarts + ')…');
+        gxUI.status('loader.stalled', { attempt: restarts });
         continue;
       }
       throw e;
@@ -118,13 +130,13 @@ function gxRunUnpackWorker(url, wasmUrl, storage, journalKey, resume, ver, watch
         gxUI.unpack(0, m.entries.length);
       } else if (m.type === 'progress') {
         gxUI.unpack(m.done, m.total);
-        if (m.verifying) gxUI.status('Проверка файлов…');
+        if (m.verifying) gxUI.status('loader.verifying');
       } else if (m.type === 'journal') {
         // Persist resume state; fire-and-forget (journal loss only costs re-work).
         if (storage.kind === 'opfs' && journalKey)
           storage.writeMeta(journalKey, { seg: m.seg, etag: m.etag, total: m.total }).catch(() => {});
       } else if (m.type === 'reconnect') {
-        gxUI.status('Соединение прервано — переподключение (попытка ' + m.attempt + ')…');
+        gxUI.status('loader.reconnecting', { attempt: m.attempt });
       } else if (m.type === 'complete') {
         ok({ files: m.files, entries: m.entries });
       } else if (m.type === 'error') {
@@ -134,11 +146,11 @@ function gxRunUnpackWorker(url, wasmUrl, storage, journalKey, resume, ver, watch
     worker.addEventListener('error', (e) => {
       const where = e.filename ? (' @ ' + e.filename + ':' + e.lineno) : '';
       console.error('[loader] worker error event:', e);
-      fail(new Error('Worker: ' + (e.message || 'не удалось загрузить unpack-worker.js') + where));
+      fail(new Error('Worker: ' + (e.message || gxText('error.workerLoad')) + where));
     });
     worker.addEventListener('messageerror', (e) => {
       console.error('[loader] worker messageerror:', e);
-      fail(new Error('Worker: ошибка сериализации сообщения'));
+      fail(new Error('Worker: ' + gxText('error.workerMessage')));
     });
     worker.postMessage({ type: 'start', url, wasmUrl, mode: storage.kind, resume, ver: bust });
   });
@@ -149,12 +161,12 @@ function gxRunUnpackWorker(url, wasmUrl, storage, journalKey, resume, ver, watch
 async function gxCheckEnvironment() {
   if (!crossOriginIsolated) {
     if (window.gxCoiPending) {
-      gxUI.status('Настройка окружения…');
+      gxUI.status('loader.environment');
       await new Promise((r) => setTimeout(r, 4000));
     }
-    if (!crossOriginIsolated) throw new Error('SharedArrayBuffer недоступен. Используйте HTTPS.');
+    if (!crossOriginIsolated) throw new Error(gxText('error.sharedArrayBuffer'));
   }
-  if (typeof WebAssembly === 'undefined') throw new Error('WebAssembly не поддерживается.');
+  if (typeof WebAssembly === 'undefined') throw new Error(gxText('error.webAssembly'));
 }
 
 // IndexedDB mode: load every stored file into window.gxFiles for the engine
@@ -271,7 +283,7 @@ async function gxBoot() {
 
     // Show settings + play immediately
     document.getElementById('gx-progress-wrap').style.display = 'none';
-    gxUI.status('Настройте сборку и нажмите Играть');
+    gxUI.status('loader.ready');
 
     const btn = document.getElementById('gx-play');
     btn.style.display = 'inline-block';
@@ -295,23 +307,34 @@ async function gxBoot() {
     // storage, and the COI service worker. Two clicks to confirm.
     const wipeBtn = document.getElementById('gx-wipe');
     let wipeArmed = false;
+    let wipeTextKey = 'shell.wipe';
+    const renderWipeText = () => { wipeBtn.textContent = gxText(wipeTextKey); };
+    window.addEventListener('gxlanguagechange', renderWipeText);
     wipeBtn.addEventListener('click', async () => {
       if (!wipeArmed) {
         wipeArmed = true;
-        wipeBtn.textContent = 'Точно удалить всё? (клик = да)';
-        setTimeout(() => { wipeArmed = false; wipeBtn.textContent = 'Очистить все данные'; }, 4000);
+        wipeTextKey = 'loader.wipeConfirm';
+        renderWipeText();
+        setTimeout(() => {
+          wipeArmed = false;
+          wipeTextKey = 'shell.wipe';
+          renderWipeText();
+        }, 4000);
         return;
       }
       wipeBtn.disabled = true;
-      wipeBtn.textContent = 'Очистка…';
+      wipeTextKey = 'loader.wiping';
+      renderWipeText();
       try {
         await gxWipeAllStorage();
-        wipeBtn.textContent = 'Готово — перезагрузка…';
+        wipeTextKey = 'loader.wipeDone';
+        renderWipeText();
         setTimeout(() => location.reload(), 600);
       } catch (e) {
         console.error('[loader] wipe failed:', e);
         wipeBtn.disabled = false;
-        wipeBtn.textContent = 'Ошибка очистки — ещё раз?';
+        wipeTextKey = 'loader.wipeError';
+        renderWipeText();
         wipeArmed = false;
       }
     });
@@ -330,7 +353,7 @@ async function gxBoot() {
     document.getElementById('gx-progress-wrap').style.display = 'block';
     gxUI.download(0, 0);
     gxUI.unpack(0, 0);
-    gxUI.status('Загрузка движка…');
+    gxUI.status('loader.engine');
     await gxPreloadEngine((received, total) => gxUI.download(received, total));
 
     // Already installed? Skip the resource download/unpack and go straight to play.
@@ -338,10 +361,10 @@ async function gxBoot() {
     if (marker && marker.complete) {
       console.log('[loader] сборка ' + build + ' уже установлена (' + marker.files + ' файлов) — пропускаю загрузку');
       if (storage.kind === 'idb') {
-        gxUI.status('Подготовка файлов…');
+        gxUI.status('loader.files');
         await gxMaterializeIdb(storage);
       }
-      gxUI.status('Запуск движка…');
+      gxUI.status('loader.starting');
       document.getElementById('gx-progress-wrap').style.display = 'none';
       await gxStartGame();
       gxUI.overlay.style.display = 'none';
@@ -359,13 +382,13 @@ async function gxBoot() {
     // the resume journal.
     const url = 'assets/' + encodeURIComponent(build) + '/build.data';
     const journalKey = 'unpack-journal-' + build;
-    gxUI.status('Загрузка и распаковка ресурсов…');
+    gxUI.status('loader.assets');
     const result = await gxStreamExtract(url, storage, journalKey);
     console.log('[loader] распаковано ' + result.files + ' файлов');
 
     // IndexedDB mode: materialize files into window.gxFiles for the engine.
     if (storage.kind === 'idb') {
-      gxUI.status('Подготовка файлов…');
+      gxUI.status('loader.files');
       await gxMaterializeIdb(storage);
     }
 
@@ -373,7 +396,7 @@ async function gxBoot() {
     await storage.writeMeta(markerKey, { complete: true, files: result.files, ts: Date.now() });
     if (storage.kind === 'opfs') await storage.writeMeta(journalKey, {}).catch(() => {});
 
-    gxUI.status('Запуск движка…');
+    gxUI.status('loader.starting');
     document.getElementById('gx-progress-wrap').style.display = 'none';
     await gxStartGame();
     gxUI.overlay.style.display = 'none';

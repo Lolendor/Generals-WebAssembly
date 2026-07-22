@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 741 390" role="img" aria-label="Flag of the United States">
+  <rect width="741" height="390" fill="#fff"/>
+  <g fill="#b22234">
+    <rect width="741" height="30"/>
+    <rect y="60" width="741" height="30"/>
+    <rect y="120" width="741" height="30"/>
+    <rect y="180" width="741" height="30"/>
+    <rect y="240" width="741" height="30"/>
+    <rect y="300" width="741" height="30"/>
+    <rect y="360" width="741" height="30"/>
+  </g>
+  <rect width="296.4" height="210" fill="#3c3b6e"/>
+  <defs>
+    <path id="star" d="M0-7 1.65-2.27 6.66-2.16 2.67.87 4.11 5.66 0 2.8-4.11 5.66-2.67.87-6.66-2.16-1.65-2.27Z"/>
+  </defs>
+  <g fill="#fff">
+    <g transform="translate(24.7 11.7)"><use href="#star"/><use href="#star" x="49.4"/><use href="#star" x="98.8"/><use href="#star" x="148.2"/><use href="#star" x="197.6"/><use href="#star" x="247"/></g>
+    <g transform="translate(49.4 35)"><use href="#star"/><use href="#star" x="49.4"/><use href="#star" x="98.8"/><use href="#star" x="148.2"/><use href="#star" x="197.6"/></g>
+    <g transform="translate(24.7 58.3)"><use href="#star"/><use href="#star" x="49.4"/><use href="#star" x="98.8"/><use href="#star" x="148.2"/><use href="#star" x="197.6"/><use href="#star" x="247"/></g>
+    <g transform="translate(49.4 81.7)"><use href="#star"/><use href="#star" x="49.4"/><use href="#star" x="98.8"/><use href="#star" x="148.2"/><use href="#star" x="197.6"/></g>
+    <g transform="translate(24.7 105)"><use href="#star"/><use href="#star" x="49.4"/><use href="#star" x="98.8"/><use href="#star" x="148.2"/><use href="#star" x="197.6"/><use href="#star" x="247"/></g>
+    <g transform="translate(49.4 128.3)"><use href="#star"/><use href="#star" x="49.4"/><use href="#star" x="98.8"/><use href="#star" x="148.2"/><use href="#star" x="197.6"/></g>
+    <g transform="translate(24.7 151.7)"><use href="#star"/><use href="#star" x="49.4"/><use href="#star" x="98.8"/><use href="#star" x="148.2"/><use href="#star" x="197.6"/><use href="#star" x="247"/></g>
+    <g transform="translate(49.4 175)"><use href="#star"/><use href="#star" x="49.4"/><use href="#star" x="98.8"/><use href="#star" x="148.2"/><use href="#star" x="197.6"/></g>
+    <g transform="translate(24.7 198.3)"><use href="#star"/><use href="#star" x="49.4"/><use href="#star" x="98.8"/><use href="#star" x="148.2"/><use href="#star" x="197.6"/><use href="#star" x="247"/></g>
+  </g>
+</svg>

@@ -20,6 +20,20 @@
     background: radial-gradient(ellipse at center, #16202b 0%, #0b0e11 100%);
     text-align: center; padding: 24px;
   }
+  /* GeneralsX @feature Lolendor 22/07/2026 Add a flag language switch to the launch screen. */
+  #gx-language-switch {
+    position: absolute; top: 16px; right: 18px;
+    width: 46px; height: 34px; padding: 5px; cursor: pointer;
+    color: inherit; background: rgba(29, 39, 51, .7);
+    border: 1px solid #2c3a4a; border-radius: 6px;
+    line-height: 1; opacity: .8;
+  }
+  #gx-language-switch img {
+    display: block; width: 34px; height: 22px; object-fit: cover;
+    border-radius: 2px; box-shadow: 0 0 0 1px rgba(255, 255, 255, .22);
+  }
+  #gx-language-switch:hover { background: #253242; opacity: 1; }
+  #gx-language-switch:focus-visible { outline: 2px solid #e8b64c; outline-offset: 3px; }
   #gx-title { font-size: 28px; letter-spacing: 2px; margin-bottom: 8px; color: #e8b64c; }
   #gx-sub { font-size: 13px; opacity: .6; margin-bottom: 40px; }
   #gx-progress-wrap { width: min(520px, 80vw); }
@@ -80,6 +94,24 @@
     padding: 14px 18px; border: 1px solid #7c3a3a; border-radius: 6px;
     background: #2a1616; color: #f0b0b0; font-size: 13px; line-height: 1.5;
     white-space: pre-wrap; text-align: left;
+  }
+  /* GeneralsX @feature Lolendor 22/07/2026 Credit the WebAssembly project on the launch screen. */
+  .footer-credit {
+    position: absolute; bottom: 18px; left: 24px; right: 24px;
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 12px;
+    font-size: 12px; color: rgba(216, 222, 230, .55);
+  }
+  .footer-credit .gh-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: #d8dee6; text-decoration: none; opacity: .75;
+  }
+  .footer-credit .gh-link:hover { color: #e8b64c; opacity: 1; }
+  .footer-credit .gh-link:focus-visible { outline: 2px solid #e8b64c; outline-offset: 3px; }
+  .footer-author, .footer-license { white-space: nowrap; }
+  .footer-author::before, .footer-license::before { content: "\00b7"; margin-right: 12px; }
+  @media (max-width: 480px) {
+    .footer-credit { bottom: 12px; font-size: 11px; gap: 5px 10px; }
+    .footer-author::before { content: none; margin-right: 0; }
   }
   /* Floating multiplayer panel (over the running game canvas) */
   #gx-mp {
@@ -143,46 +175,60 @@
 </div>
 
 <div id="gx-overlay">
+  <button id="gx-language-switch" type="button" aria-label="Switch language">
+    <img id="gx-language-flag" src="i18n/flags/us.svg" width="34" height="22" alt="" draggable="false">
+  </button>
   <div id="gx-title">C&amp;C GENERALS: ZERO HOUR</div>
-  <div id="gx-sub">веб-версия &middot; wasm + WebGL2</div>
+  <div id="gx-sub" data-i18n="shell.subtitle">веб-версия &middot; wasm + WebGL2</div>
   <div id="gx-progress-wrap">
     <div class="gx-prog">
-      <div class="gx-prog-head"><span class="gx-lbl">Загрузка</span><span class="gx-val" id="gx-dl-val">0%</span></div>
+      <div class="gx-prog-head"><span class="gx-lbl" data-i18n="shell.download">Загрузка</span><span class="gx-val" id="gx-dl-val">0%</span></div>
       <div id="gx-track"><div id="gx-bar"></div></div>
     </div>
     <div class="gx-prog">
-      <div class="gx-prog-head"><span class="gx-lbl">Распаковка</span><span class="gx-val" id="gx-un-val">0%</span></div>
+      <div class="gx-prog-head"><span class="gx-lbl" data-i18n="shell.unpack">Распаковка</span><span class="gx-val" id="gx-un-val">0%</span></div>
       <div id="gx-track2"><div id="gx-bar2"></div></div>
     </div>
   </div>
-  <div id="gx-detail">Инициализация…</div>
-  <button id="gx-play">Играть</button>
-  <button id="gx-settings-btn" type="button">Настройки</button>
+  <div id="gx-detail" data-i18n="shell.initializing">Инициализация…</div>
+  <button id="gx-play" data-i18n="shell.play">Играть</button>
+  <button id="gx-settings-btn" type="button" data-i18n="shell.settings">Настройки</button>
   <div id="gx-settings" hidden>
-    <label>Лимит FPS:
+    <label><span data-i18n="shell.fpsLimit">Лимит FPS:</span>
       <select id="gx-fps">
-        <option value="30">30 (оригинал)</option>
+        <option value="30" data-i18n="shell.original">30 (оригинал)</option>
         <option value="60">60</option>
         <option value="90">90</option>
         <option value="120">120</option>
         <option value="144">144</option>
       </select>
     </label>
-    <label>Сборка:
+    <label><span data-i18n="shell.build">Сборка:</span>
       <select id="gx-build">
         <option value="default_ru">default_ru (Generals ZH)</option>
       </select>
     </label>
-    <div id="gx-settings-note">Сохраняется в браузере; применяется при запуске игры.</div>
-    <button id="gx-wipe" type="button">Очистить все данные</button>
-    <div id="gx-wipe-note">Удаляет скачанные ресурсы, сейвы и настройки (OPFS, IndexedDB, кэши). Понадобится полная перезагрузка ресурсов.</div>
+    <div id="gx-settings-note" data-i18n="shell.settingsNote">Сохраняется в браузере; применяется при запуске игры.</div>
+    <button id="gx-wipe" type="button" data-i18n="shell.wipe">Очистить все данные</button>
+    <div id="gx-wipe-note" data-i18n="shell.wipeNote">Удаляет скачанные ресурсы, сейвы и настройки (OPFS, IndexedDB, кэши). Понадобится полная перезагрузка ресурсов.</div>
   </div>
   <div id="gx-error"></div>
   <div id="gx-storage-kind"></div>
+  <span class="footer-credit">
+    <a href="https://github.com/Lolendor/Generals-WebAssembly" target="_blank" rel="noopener noreferrer" class="gh-link">
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      Lolendor/Generals-WebAssembly
+    </a>
+    <span class="footer-author" data-i18n="shell.author">Автор: Lolendor</span>
+    <span class="footer-license">GPL-3.0</span>
+  </span>
 </div>
 
 <script src="coi-serviceworker.js"></script>
 <script src="brotli.min.js"></script>
+<script src="i18n/ru.js"></script>
+<script src="i18n/en.js"></script>
+<script src="i18n/i18n.js"></script>
 <script src="storage.js"></script>
 <script src="signaling.js"></script>
 <script src="netbridge.js"></script>
