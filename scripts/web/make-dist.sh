@@ -19,10 +19,19 @@
 # Creates:
 #   scripts/web/pack-assets.sh {build}   (once per build)
 #
+# Usage:
+#   scripts/web/make-dist.sh [--skip-assets] [WASM_DIR]
+#
 # GeneralsX @build web-port 05/07/2026 - Web port Phase 1
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SKIP_ASSETS=false
+if [ "${1:-}" = "--skip-assets" ]; then
+    # GeneralsX @build Lolendor 22/07/2026 Refresh the web shell without repacking game data.
+    SKIP_ASSETS=true
+    shift
+fi
 WASM_DIR="${1:-$REPO_ROOT/build/emscripten/GeneralsMD}"
 DIST="$REPO_ROOT/web/dist"
 
@@ -37,6 +46,8 @@ mkdir -p "$DIST"
 # ── Shell ─────────────────────────────────────────────────────────────────────
 echo "==> Shell"
 cp "$REPO_ROOT"/web/shell/*.js "$REPO_ROOT"/web/shell/index.html "$DIST/"
+mkdir -p "$DIST/i18n"
+cp -R "$REPO_ROOT/web/shell/i18n/." "$DIST/i18n/"
 cp "$REPO_ROOT"/web/shell/brotli_bg.wasm "$DIST/"   # brotli-wasm decoder blob
 if [ ! -f "$DIST/ice.json" ]; then
     cp "$REPO_ROOT/web/shell/ice.json" "$DIST/"
@@ -50,6 +61,16 @@ cp "$WASM_DIR/GeneralsXZH.js" "$WASM_DIR/GeneralsXZH.wasm" "$DIST/"
 BUILD_ID=$(shasum -a 256 "$DIST/GeneralsXZH.wasm" | cut -c1-12)
 printf '{"buildId": "%s"}\n' "$BUILD_ID" > "$DIST/build.json"
 echo "    buildId: $BUILD_ID"
+
+if $SKIP_ASSETS; then
+    if [ ! -f "$DIST/assets/builds.json" ]; then
+        echo "ERROR: --skip-assets requires existing $DIST/assets/builds.json" >&2
+        exit 1
+    fi
+    echo "==> Assets: keeping existing packed game data (--skip-assets)"
+    echo "==> Done: $DIST"
+    exit 0
+fi
 
 # ── Discover builds (directories under web/gamedata/) ─────────────────────────
 BUILDS=()
